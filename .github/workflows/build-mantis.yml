@@ -114,7 +114,21 @@ jobs:
           curl -fsSL "https://github.com/aya-rs/bpf-linker/releases/download/$BPF_LINKER_VERSION/bpf-linker-$arch-unknown-linux-musl.tar.zst" -o /tmp/bl/bl.tar.zst
           zstd -dq /tmp/bl/bl.tar.zst -o /tmp/bl/bl.tar
           tar -xf /tmp/bl/bl.tar -C /tmp/bl
-          install -m 0755 "$(find /tmp/bl -type f -name bpf-linker | head -n 1)" "$HOME/.bpf-linker/bpf-linker"
+          install -m 0755 "$(find /tmp/bl -type f -name bpf-linker | head -n 1)" "$HOME/.bpf-linker/bpf-linker.real"
+          cat > "$HOME/.bpf-linker/bpf-linker" <<'EOF'
+          #!/usr/bin/env bash
+          args=(); skip=0
+          for a in "$@"; do
+            if [ "$skip" = 1 ]; then skip=0; continue; fi
+            case "$a" in
+              --cpu) skip=1 ;;
+              --cpu=*) ;;
+              *) args+=("$a") ;;
+            esac
+          done
+          exec "$(dirname "$0")/bpf-linker.real" "${args[@]}"
+          EOF
+          chmod +x "$HOME/.bpf-linker/bpf-linker"
           echo "$HOME/.bpf-linker" >> "$GITHUB_PATH"
           "$HOME/.bpf-linker/bpf-linker" --version
 
