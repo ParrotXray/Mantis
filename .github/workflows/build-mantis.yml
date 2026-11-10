@@ -192,8 +192,13 @@ jobs:
       - name: Save built version
         run: |
           echo "${{ needs.check-version.outputs.sha }}" > .last-built-version
+          if [ -z "$(git status --porcelain -- .last-built-version)" ]; then
+            echo "version already recorded"
+            exit 0
+          fi
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .last-built-version
-          git commit -m "chore: built ${{ needs.check-version.outputs.sha }}" || echo "no change"
+          git commit -m "chore: built ${{ needs.check-version.outputs.sha }}"
+          git pull --rebase origin main
           git push
