@@ -147,7 +147,7 @@ jobs:
 
           grep -c 'bpf' <(strings build/mantis) | head -1
 
-      - name:
+      - name: Rename artifact
         run: |
           f=$(ls dist/*.tar.gz)
           mv "$f" "dist/$(basename "$f" .tar.gz)-${{ matrix.name }}.tar.gz"
