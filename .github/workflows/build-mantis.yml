@@ -48,22 +48,27 @@ jobs:
             runs-on: ubuntu-24.04
             rustflags: "-C target-cpu=x86-64-v4"
             cargo_target: x86_64-unknown-linux-gnu
+            avx_level: avx512
           - name: linux-amd64-avx2
             runs-on: ubuntu-24.04
             rustflags: "-C target-cpu=x86-64-v3"
             cargo_target: x86_64-unknown-linux-gnu
+            avx_level: avx2
           - name: linux-amd64-avx
             runs-on: ubuntu-24.04
-            rustflags: "-C target-cpu=sandybridge"   # AVX, 無 AVX2
+            rustflags: "-C target-cpu=sandybridge"
             cargo_target: x86_64-unknown-linux-gnu
+            avx_level: avx
           - name: linux-amd64-baseline
             runs-on: ubuntu-24.04
             rustflags: "-C target-cpu=x86-64"
             cargo_target: x86_64-unknown-linux-gnu
+            avx_level: none
           - name: linux-aarch64
             runs-on: ubuntu-24.04-arm
             rustflags: ""
             cargo_target: ""
+            avx_level: ""
     runs-on: ${{ matrix.runs-on }}
     name: Build (${{ matrix.name }})
     permissions:
@@ -117,11 +122,13 @@ jobs:
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ${{ matrix.rustflags }}
           GH_TOKEN: ${{ secrets.MANTIS_PAT }}
+          GITHUB_TOKEN: ${{ github.token }}
+          AVX_LEVEL: ${{ matrix.avx_level }}
         run: |
           cp config.toml.example config.toml
           make dist NICE= CARGO_TARGET=${{ matrix.cargo_target }}
 
-      - name: Rename (避免 x86 variant 同名)
+      - name: Rename
         run: |
           f=$(ls dist/*.tar.gz)
           mv "$f" "dist/$(basename "$f" .tar.gz)-${{ matrix.name }}.tar.gz"
