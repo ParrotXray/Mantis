@@ -75,7 +75,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config clang llvm libelf-dev libssl-dev
+          sudo apt-get install -y build-essential pkg-config clang llvm libelf-dev libssl-dev zstd
 
       - uses: actions/setup-node@v4
         with:
@@ -89,7 +89,20 @@ jobs:
         with:
           key: ${{ matrix.name }}
 
-      - run: cargo install bpf-linker
+      - name: Install bpf-linker (prebuilt)
+        run: |
+          BPF_LINKER_VERSION=$(sed -n 's/^BPF_LINKER_VERSION="\(.*\)"/\1/p' tools/xdp-test/run.sh)
+          case "$(uname -m)" in
+            x86_64)  arch=x86_64 ;;
+            aarch64) arch=aarch64 ;;
+          esac
+          mkdir -p "$HOME/.bpf-linker" /tmp/bl
+          curl -fsSL "https://github.com/aya-rs/bpf-linker/releases/download/$BPF_LINKER_VERSION/bpf-linker-$arch-unknown-linux-musl.tar.zst" -o /tmp/bl/bl.tar.zst
+          zstd -dq /tmp/bl/bl.tar.zst -o /tmp/bl/bl.tar
+          tar -xf /tmp/bl/bl.tar -C /tmp/bl
+          install -m 0755 "$(find /tmp/bl -type f -name bpf-linker | head -n 1)" "$HOME/.bpf-linker/bpf-linker"
+          echo "$HOME/.bpf-linker" >> "$GITHUB_PATH"
+          "$HOME/.bpf-linker/bpf-linker" --version
 
       - name: make dist
         env:
