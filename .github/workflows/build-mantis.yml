@@ -13,6 +13,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       sha: ${{ steps.upstream.outputs.sha }}
+      full: ${{ steps.upstream.outputs.full }}
       skip: ${{ steps.check.outputs.skip }}
     steps:
       - uses: actions/checkout@v4
@@ -22,8 +23,9 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.MANTIS_PAT }}
         run: |
-          SHA=$(gh api repos/$SRC_REPO/commits/main --jq '.sha[0:8]')
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          FULL=$(gh api repos/$SRC_REPO/commits/main --jq '.sha')
+          echo "full=$FULL" >> $GITHUB_OUTPUT
+          echo "sha=${FULL:0:8}" >> $GITHUB_OUTPUT
 
       - name: Check if already built
         id: check
@@ -66,7 +68,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SRC_REPO }}
-          ref: ${{ needs.check-version.outputs.sha }}
+          ref: ${{ needs.check-version.outputs.full }}
           token: ${{ secrets.MANTIS_PAT }}
           submodules: recursive
 
