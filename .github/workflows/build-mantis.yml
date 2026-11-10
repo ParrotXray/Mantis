@@ -110,7 +110,7 @@ jobs:
 
       - name: make dist
         env:
-          RUSTFLAGS: ${{ matrix.rustflags }}
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: ${{ matrix.rustflags }}
           GH_TOKEN: ${{ secrets.MANTIS_PAT }}
         run: |
           cp config.toml.example config.toml
