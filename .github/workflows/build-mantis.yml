@@ -137,15 +137,13 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           AVX_LEVEL: ${{ matrix.avx_level }}
         run: |
-          cp config.toml.example config.toml
           make dist NICE= CARGO_TARGET=${{ matrix.cargo_target }}
 
       - name: Verify eBPF built and embedded
         run: |
           find target -type f \( -name 'mantis-ingress' -o -name 'mantis-egress' \) -path '*bpfel-unknown-none*' | tee /tmp/ebpf.txt
           [ "$(wc -l < /tmp/ebpf.txt)" -ge 2 ] || { echo "eBPF objects missing"; exit 1; }
-
-          grep -c 'bpf' <(strings build/mantis) | head -1
+          strings build/mantis | grep -q 'access_control' || { echo "eBPF not embedded"; exit 1; }
 
       - name: Rename artifact
         run: |
@@ -164,6 +162,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: write
     steps:
       - uses: actions/checkout@v4
 
@@ -202,7 +201,7 @@ jobs:
           git commit -m "chore: built ${{ needs.check-version.outputs.sha }}"
           git pull --rebase origin main
           git push
-          
+
       - name: Delete build artifacts
         env:
           GH_TOKEN: ${{ github.token }}
