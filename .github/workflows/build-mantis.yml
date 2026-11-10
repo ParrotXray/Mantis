@@ -1,0 +1,128 @@
+name: Build Mantis
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+env:
+  SRC_REPO: ParrotXray/Mantis-Dev
+
+jobs:
+  check-version:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.upstream.outputs.sha }}
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get latest Mantis-Dev commit
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.MANTIS_PAT }}
+        run: |
+          SHA=$(gh api repos/$SRC_REPO/commits/main --jq '.sha[0:8]')
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+
+      - name: Check if already built
+        id: check
+        run: |
+          LAST=$(cat .last-built-version 2>/dev/null || echo none)
+          if [ "$LAST" = "${{ steps.upstream.outputs.sha }}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check-version
+    if: needs.check-version.outputs.skip == 'false' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64-avx512
+            runs-on: ubuntu-24.04
+            rustflags: "-C target-cpu=x86-64-v4"
+          - name: linux-amd64-avx2
+            runs-on: ubuntu-24.04
+            rustflags: "-C target-cpu=x86-64-v3"
+          - name: linux-amd64-avx
+            runs-on: ubuntu-24.04
+            rustflags: "-C target-cpu=sandybridge"
+          - name: linux-amd64-baseline
+            runs-on: ubuntu-24.04
+            rustflags: "-C target-cpu=x86-64"
+          - name: linux-aarch64
+            runs-on: ubuntu-24.04-arm
+            rustflags: ""
+    runs-on: ${{ matrix.runs-on }}
+    name: Build (${{ matrix.name }})
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Mantis-Dev (private)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SRC_REPO }}
+          ref: ${{ needs.check-version.outputs.sha }}
+          token: ${{ secrets.MANTIS_PAT }}
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config clang llvm libelf-dev libssl-dev
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - run: cargo install bpf-linker
+
+      - name: make dist
+        env:
+          RUSTFLAGS: ${{ matrix.rustflags }}
+          GH_TOKEN: ${{ secrets.MANTIS_PAT }}
+        run: |
+          cp config.toml.example config.toml
+          make dist NICE=
+
+      - name: Rename
+        run: |
+          f=$(ls dist/*.tar.gz)
+          mv "$f" "dist/$(basename "$f" .tar.gz)-${{ matrix.name }}.tar.gz"
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          repository: ${{ github.repository }}
+          tag_name: build-${{ needs.check-version.outputs.sha }}
+          name: "Mantis ${{ needs.check-version.outputs.sha }}"
+          files: dist/*.tar.gz
+
+  save-version:
+    needs: [check-version, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Save built version
+        run: |
+          echo "${{ needs.check-version.outputs.sha }}" > .last-built-version
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .last-built-version
+          git commit -m "chore: built ${{ needs.check-version.outputs.sha }}"
+          git push
