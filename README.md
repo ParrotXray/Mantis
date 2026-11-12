@@ -35,6 +35,6 @@ Mantis is designed to work on any Ubuntu-based system meeting the following requ
 - install: Look at the requiring  with step by step from deploy.sh
 
 ## Contribution 
-- @DaLaw2: Propose the ebpf technology in https://github.com/DaLaw2/NetGuardia
+- @DaLaw2 : Propose the ebpf technology in https://github.com/DaLaw2/NetGuardia
 
 The system is not limited to embedded platforms and can be deployed on standard server hardware, virtual machines, or dedicated appliances running Ubuntu.
