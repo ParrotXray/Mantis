@@ -32,7 +32,7 @@ Mantis is designed to work on any Ubuntu-based system meeting the following requ
 ## How to install system
 - download: Download from release page in github then select conform to architecture with your computer
 - run script: Unpack your package by downloading then opration deploy.sh script
-- install: Look at the requiring  with step by step from deploy.sh
+- install: Look at the requiring with step by step from deploy.sh
 
 ## Contribution 
 - **@DaLaw2**: Propose the ebpf technology in https://github.com/DaLaw2/NetGuardia
