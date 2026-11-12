@@ -148,8 +148,9 @@ jobs:
       - name: Rename artifact
         run: |
           f=$(ls dist/*.tar.gz)
-          base=$(basename "$f" | sed -E 's/-(aarch64|x86_64|.tar.gz)-.*//' | sed 's/\.tar\.gz$//')
-          mv "$f" "dist/${base}-${{ matrix.name }}-${{ needs.check-version.outputs.sha }}.tar.gz"
+          base=$(basename "$f" .tar.gz | sed -E 's/-(aarch64|x86_64).*//')
+          target="dist/${base}-${{ matrix.name }}-${{ needs.check-version.outputs.sha }}.tar.gz"
+          [ "$f" != "$target" ] && mv "$f" "$target"
 
       - uses: actions/upload-artifact@v4
         with:
