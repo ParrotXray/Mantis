@@ -1,0 +1,133 @@
+#!/bin/sh
+#
+# Appliance security and system settings, from /opt/mantis/appliance.conf
+# (written by mantis-setup), applied at every boot before the network is up:
+#   TIMEZONE=Asia/Taipei        /etc/localtime
+#   FIREWALL=on|off             nftables input policy on the management side
+#   MGMT_ALLOW="10.0.0.0/24 ..." source networks allowed to SSH / HTTPS (empty: any)
+#   HTTPS_PORT=443              stunnel in front of the web UI
+#   WEB_HTTP=0|1                also allow the plain HTTP web UI port from outside
+#   SSH_PASSWORD=yes|no         allow password logins over SSH
+# Persistent state on the data partition (survives a rootfs upgrade):
+#   /opt/mantis/ssh/dropbear/       SSH host keys (/etc/dropbear links here)
+#   /opt/mantis/ssh/authorized_keys root's SSH keys
+#   /opt/mantis/tls/mantis.{crt,key} web UI certificate (self-signed on first boot,
+#                                    replace with your own and restart stunnel)
+
+PREFIX="/opt/mantis"
+CONF="$PREFIX/appliance.conf"
+
+load_conf() {
+	TIMEZONE="" FIREWALL="on" MGMT_ALLOW="" HTTPS_PORT="443" WEB_HTTP="0" SSH_PASSWORD="yes"
+	[ -f "$CONF" ] && . "$CONF"
+	HTTP_PORT=$(sed -n -E 's/^http_server_bind_port[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' \
+		"$PREFIX/config.toml" 2>/dev/null)
+	HTTP_PORT="${HTTP_PORT:-8080}"
+}
+
+apply_timezone() {
+	if [ -n "$TIMEZONE" ] && [ -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+		ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+		echo "$TIMEZONE" > /etc/timezone
+	fi
+}
+
+# Only traffic TO the appliance is filtered. Inspected traffic never reaches
+# this hook: XDP / AF_XDP run before netfilter, and the fail-open bridge has
+# no br_netfilter.
+apply_firewall() {
+	nft delete table inet mantis 2>/dev/null
+	[ "$FIREWALL" = off ] && return 0
+	v4="" v6=""
+	for net in $MGMT_ALLOW; do
+		case "$net" in
+			*:*) v6="$v6${v6:+, }$net" ;;
+			*) v4="$v4${v4:+, }$net" ;;
+		esac
+	done
+	ports="22, $HTTPS_PORT"
+	[ "$WEB_HTTP" = 1 ] && ports="$ports, $HTTP_PORT"
+	{
+		echo "table inet mantis {"
+		echo "  chain input {"
+		echo "    type filter hook input priority filter; policy drop;"
+		echo "    iif lo accept"
+		echo "    ct state established,related accept"
+		echo "    ct state invalid drop"
+		echo "    meta l4proto icmp accept"
+		echo "    meta l4proto ipv6-icmp accept"
+		echo "    udp dport 68 accept comment \"DHCP replies\""
+		if [ -n "$v4$v6" ]; then
+			[ -n "$v4" ] && echo "    ip saddr { $v4 } tcp dport { $ports } accept"
+			[ -n "$v6" ] && echo "    ip6 saddr { $v6 } tcp dport { $ports } accept"
+		else
+			echo "    tcp dport { $ports } accept"
+		fi
+		echo "  }"
+		echo "}"
+	} > /run/mantis-firewall.nft
+	nft -f /run/mantis-firewall.nft
+}
+
+apply_ssh() {
+	install -d -m 700 "$PREFIX/ssh" "$PREFIX/ssh/dropbear" /root/.ssh
+	[ -f "$PREFIX/ssh/authorized_keys" ] || install -m 600 /dev/null "$PREFIX/ssh/authorized_keys"
+	chmod 600 "$PREFIX/ssh/authorized_keys"
+	ln -sfn "$PREFIX/ssh/authorized_keys" /root/.ssh/authorized_keys
+	# -s: no password logins at all, keys only
+	install -d /etc/default
+	if [ "$SSH_PASSWORD" = no ]; then
+		echo 'DROPBEAR_ARGS="-s"' > /etc/default/dropbear
+	else
+		echo 'DROPBEAR_ARGS=""' > /etc/default/dropbear
+	fi
+}
+
+apply_https() {
+	install -d -m 700 "$PREFIX/tls"
+	if [ ! -s "$PREFIX/tls/mantis.key" ] || [ ! -s "$PREFIX/tls/mantis.crt" ]; then
+		openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+			-days 3650 -subj "/CN=$(hostname)" -addext "subjectAltName=DNS:$(hostname)" \
+			-keyout "$PREFIX/tls/mantis.key" -out "$PREFIX/tls/mantis.crt" >/dev/null 2>&1 \
+			&& chmod 600 "$PREFIX/tls/mantis.key"
+	fi
+	install -d /etc/stunnel
+	cat > /etc/stunnel/stunnel.conf <<EOF
+; Written by /etc/init.d/S22security from /opt/mantis/appliance.conf
+pid = /var/run/stunnel.pid
+[mantis-web]
+accept = $HTTPS_PORT
+connect = 127.0.0.1:$HTTP_PORT
+cert = $PREFIX/tls/mantis.crt
+key = $PREFIX/tls/mantis.key
+EOF
+}
+
+# BusyBox crond reads /var/spool/cron/crontabs (tmpfs): write it every boot
+apply_cron() {
+	install -d /var/spool/cron/crontabs
+	echo "*/10 * * * * /usr/sbin/mantis-logrotate" > /var/spool/cron/crontabs/root
+}
+
+start() {
+	printf "Applying Mantis security settings: "
+	load_conf
+	apply_timezone
+	apply_firewall && fw="firewall ${FIREWALL}" || fw="firewall FAILED"
+	apply_ssh
+	apply_https
+	apply_cron
+	echo "$fw, ssh password ${SSH_PASSWORD}, https :$HTTPS_PORT${TIMEZONE:+, $TIMEZONE}"
+}
+
+case "$1" in
+	start) start ;;
+	stop) ;;
+	restart|reload)
+		start
+		# pick up the new settings in the running daemons
+		[ -x /etc/init.d/S50dropbear ] && /etc/init.d/S50dropbear restart >/dev/null
+		[ -x /etc/init.d/S50stunnel ] && /etc/init.d/S50stunnel restart >/dev/null
+		;;
+	*) echo "Usage: $0 {start|restart}"; exit 1 ;;
+esac

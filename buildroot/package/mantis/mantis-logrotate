@@ -1,0 +1,78 @@
+#!/bin/sh
+#
+# mantis-logrotate: keep /opt/mantis (the data partition) from filling up.
+# Run every 10 minutes by crond (S22security writes the crontab).
+#
+# 1. console.log (stdout of Mantis and the supervisor) is rotated when it
+#    exceeds LOG_MAX_MB: console.log.1.gz ... console.log.<LOG_KEEP>.gz.
+#    copy + truncate: the writers keep their O_APPEND descriptor, nothing has
+#    to be restarted.
+# 2. Mantis' own daily logs (state/logs/Mantis.YYYY-MM-DD) older than
+#    LOG_DAYS are deleted.
+# 3. Disk guard: above DISK_MAX_PCT usage, the oldest rotated logs, daily logs
+#    and then per-day traffic records (state/records/*.csv) are deleted until
+#    usage is DISK_MAX_PCT - 5 or lower. Every deletion is logged. app.db,
+#    config.toml and the current day's files are never touched.
+#
+# Settings (appliance.conf, or the environment for a one-off run):
+#   LOG_MAX_MB=50  LOG_KEEP=7  LOG_DAYS=30  DISK_MAX_PCT=90
+
+PREFIX="/opt/mantis"
+LOGDIR="$PREFIX/state/logs"
+CONSOLE="$LOGDIR/console.log"
+
+env_max="${LOG_MAX_MB:-}" env_keep="${LOG_KEEP:-}" env_days="${LOG_DAYS:-}" env_disk="${DISK_MAX_PCT:-}"
+[ -f "$PREFIX/appliance.conf" ] && . "$PREFIX/appliance.conf"
+LOG_MAX_MB="${env_max:-${LOG_MAX_MB:-50}}"
+LOG_KEEP="${env_keep:-${LOG_KEEP:-7}}"
+LOG_DAYS="${env_days:-${LOG_DAYS:-30}}"
+DISK_MAX_PCT="${env_disk:-${DISK_MAX_PCT:-90}}"
+
+note() {
+	echo "=== $(date '+%F %T') logrotate: $*" >> "$CONSOLE"
+	logger -t mantis-logrotate "$*" 2>/dev/null
+}
+
+# Only one run at a time
+exec 9> /run/mantis-logrotate.lock
+flock -n 9 || exit 0
+
+# --- 1. console.log -------------------------------------------------------
+if [ -f "$CONSOLE" ]; then
+	size=$(wc -c < "$CONSOLE")
+	if [ "$size" -gt $((LOG_MAX_MB * 1024 * 1024)) ]; then
+		rm -f "$CONSOLE.$LOG_KEEP.gz"
+		i=$((LOG_KEEP - 1))
+		while [ "$i" -ge 1 ]; do
+			[ -f "$CONSOLE.$i.gz" ] && mv "$CONSOLE.$i.gz" "$CONSOLE.$((i + 1)).gz"
+			i=$((i - 1))
+		done
+		cp "$CONSOLE" "$CONSOLE.1" && : > "$CONSOLE" && gzip -f "$CONSOLE.1"
+		note "console.log rotated at $((size / 1024 / 1024)) MiB (keeping $LOG_KEEP)"
+	fi
+fi
+
+# --- 2. Mantis' daily logs ------------------------------------------------
+find "$LOGDIR" -maxdepth 1 -type f -name 'Mantis.*' -mtime +"$LOG_DAYS" 2>/dev/null | while read -r f; do
+	rm -f "$f"
+	note "deleted $(basename "$f") (older than $LOG_DAYS days)"
+done
+
+# --- 3. disk guard --------------------------------------------------------
+used() { df -P "$PREFIX" | awk 'NR == 2 { sub("%", "", $5); print $5 }'; }
+target=$((DISK_MAX_PCT - 5))
+today=$(date +%F)
+if [ "$(used)" -gt "$DISK_MAX_PCT" ]; then
+	note "disk guard: $PREFIX at $(used)% (limit $DISK_MAX_PCT%), freeing space down to $target%"
+	# oldest first: rotated console logs, daily logs, then traffic records
+	for f in $(ls -1tr "$CONSOLE".*.gz 2>/dev/null) \
+		$(ls -1tr "$LOGDIR"/Mantis.* 2>/dev/null) \
+		$(ls -1tr "$PREFIX"/state/records/*.csv 2>/dev/null); do
+		[ "$(used)" -le "$target" ] && break
+		case "$f" in *"$today"*) continue ;; esac
+		rm -f "$f"
+		note "disk guard: deleted $(basename "$f")"
+	done
+	[ "$(used)" -gt "$DISK_MAX_PCT" ] && note "disk guard: still at $(used)%, nothing left to delete safely"
+fi
+exit 0

@@ -1,0 +1,195 @@
+#!/bin/sh
+#
+# mantis-upgrade: A/B upgrades of the Mantis appliance.
+#
+#   mantis-upgrade status
+#   mantis-upgrade latest  [--tag build-<sha>] [--variant <v>] [--no-reboot]
+#   mantis-upgrade install <rootfs.ext4.gz | rootfs.ext4 | http(s)://...> --sha256 <hex> [--no-reboot] [--force]
+#
+# The new root filesystem is written to the inactive slot and checked
+# byte for byte; the next boot tries it once (grub.cfg). S99upgrade confirms
+# it when Mantis is up; otherwise the box goes back to the current slot by
+# itself. The data partition (config.toml, app.db, records, ssh, tls) is
+# shared by both slots; app.db and config.toml are copied before the trial
+# and restored if it rolls back.
+#
+# --sha256 is the SHA-256 of the file given (as in the release SHA256SUMS).
+# --force skips the "is this a Mantis rootfs" checks (tests, recovery).
+
+set -eu
+. /usr/lib/mantis/slots.sh
+
+REPO="${MANTIS_RELEASE_REPO:-ParrotXray/Mantis}"
+WORK="/opt/mantis/upgrade"
+
+die() { echo "mantis-upgrade: $*" >&2; exit 1; }
+
+usage() {
+	sed -n '3,9p' "$0" | sed 's/^# \{0,1\}//'
+	exit 2
+}
+
+cmd_status() {
+	efi_mount
+	booted=$(slot_booted)
+	echo "booted slot:    $booted$(trial_unconfirmed && echo ' (trial, not confirmed yet)')"
+	echo "committed slot: $(env_get slot)"
+	try=$(env_get try_slot)
+	[ -n "$try" ] && echo "pending trial:  $try (try_count=$(env_get try_count))"
+	for s in a b; do
+		rel=$(slot_release "$s" || true)
+		if [ -n "$rel" ]; then
+			echo "slot $s:         build-$(release_field "$rel" MANTIS_SHA) $(release_field "$rel" MANTIS_VARIANT), built $(release_field "$rel" BUILT)"
+		else
+			echo "slot $s:         (empty or not a Mantis rootfs)"
+		fi
+	done
+	last=$(env_get last_result)
+	[ -n "$last" ] && echo "last upgrade:   $last"
+	efi_umount
+	[ -f "$MANTIS_UPGRADE_LOG" ] && { echo; echo "upgrade log (last 5):"; tail -5 "$MANTIS_UPGRADE_LOG"; }
+	return 0
+}
+
+fetch() { # url dest
+	curl -fL --retry 3 --connect-timeout 20 -o "$2" "$1"
+}
+
+# install <source> <sha256 of source> <reboot 0|1> <force 0|1>
+do_install() {
+	src="$1" want="$2" reboot="$3" force="$4"
+	[ "$(id -u)" = 0 ] || die "run as root"
+	trial_unconfirmed && die "this is an unconfirmed trial boot; wait for it to be confirmed or rolled back"
+	booted=$(slot_booted)
+	[ -n "$booted" ] || die "cannot tell the booted slot (no mantis.slot= on the kernel command line)"
+	target=$(slot_other "$booted")
+	dev=$(slot_dev "$target") || die "no partition for slot $target on $(boot_disk)"
+	grep -q "^$dev " /proc/mounts && die "$dev (slot $target) is mounted"
+
+	install -d -m 700 "$WORK"
+	case "$src" in
+		http://* | https://*)
+			file="$WORK/$(basename "$src")"
+			echo "Downloading $src"
+			fetch "$src" "$file" || die "download failed"
+			;;
+		*)
+			[ -f "$src" ] || die "no such file: $src"
+			file="$src"
+			;;
+	esac
+
+	if [ -n "$want" ]; then
+		got=$(sha256sum "$file" | cut -d' ' -f1)
+		[ "$got" = "$want" ] || die "SHA-256 mismatch: $got, expected $want"
+		echo "SHA-256 OK"
+	elif [ "$force" != 1 ]; then
+		die "--sha256 is required (it is in the release SHA256SUMS file)"
+	fi
+
+	case "$file" in
+		*.gz) cat_img() { gunzip -c "$file"; } ;;
+		*) cat_img() { cat "$file"; } ;;
+	esac
+	size=$(cat_img | wc -c)
+	part_size=$(blockdev --getsize64 "$dev")
+	[ "$size" -le "$part_size" ] || die "image ($size bytes) larger than slot $target ($part_size bytes)"
+	raw_sha=$(cat_img | sha256sum | cut -d' ' -f1)
+
+	echo "Writing slot $target ($dev, $((size / 1024 / 1024)) MiB) ..."
+	cat_img | dd of="$dev" bs=4M 2>/dev/null
+	sync
+	blockdev --flushbufs "$dev"
+	# read back from the disk, not the page cache
+	echo 3 > /proc/sys/vm/drop_caches
+	check=$(head -c "$size" "$dev" | sha256sum | cut -d' ' -f1)
+	[ "$check" = "$raw_sha" ] || die "slot $target reads back differently from the image (bad disk?)"
+	echo "Slot $target verified"
+
+	rel=$(slot_release "$target" || true)
+	if [ "$force" != 1 ]; then
+		[ -n "$rel" ] || die "slot $target holds no /etc/mantis-release: not a Mantis rootfs image (nothing changed, the slot is just not bootable)"
+		mnt=/run/mantis-slot-check
+		mkdir -p "$mnt"
+		mount -t ext4 -o ro "$dev" "$mnt" || die "slot $target is not an ext4 filesystem"
+		ok=1
+		[ -f "$mnt/boot/bzImage" ] || ok=0
+		[ -x "$mnt/usr/share/mantis-dist/mantis" ] || ok=0
+		umount "$mnt"
+		[ "$ok" = 1 ] || die "slot $target has no kernel or no Mantis: refusing to boot it"
+	fi
+	new="build-$(release_field "$rel" MANTIS_SHA) $(release_field "$rel" MANTIS_VARIANT)"
+
+	# what to restore if the trial rolls back
+	for f in state/app.db config.toml; do
+		[ -f "/opt/mantis/$f" ] && cp -p "/opt/mantis/$f" "/opt/mantis/$f.pre-upgrade"
+	done
+
+	efi_mount
+	env_set try_slot="$target" try_count=0 rollback_from= "pending=$new"
+	efi_umount
+	upgrade_log "slot $target written with $new; next boot tries it (current slot $booted stays the fallback)"
+	[ "$file" != "$src" ] && rm -f "$file"
+
+	if [ "$reboot" = 1 ]; then
+		echo "Rebooting into slot $target ..."
+		reboot
+	else
+		echo "Reboot to try slot $target: reboot"
+	fi
+}
+
+cmd_latest() {
+	tag="" variant="" reboot=1
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--tag) tag="$2"; shift 2 ;;
+			--variant) variant="$2"; shift 2 ;;
+			--no-reboot) reboot=0; shift ;;
+			*) usage ;;
+		esac
+	done
+	variant="${variant:-$(sed -n 's/^MANTIS_VARIANT=//p' /etc/mantis-release)}"
+	current=$(sed -n 's/^MANTIS_SHA=//p' /etc/mantis-release)
+	if [ -n "$tag" ]; then
+		api="https://api.github.com/repos/$REPO/releases/tags/$tag"
+	else
+		api="https://api.github.com/repos/$REPO/releases/latest"
+	fi
+	json=$(curl -fsSL --connect-timeout 20 "$api") || die "cannot reach $api"
+	urls=$(echo "$json" | grep -oE '"browser_download_url": *"[^"]+"' | sed -E 's/.*"(https[^"]+)"$/\1/')
+	url=$(echo "$urls" | grep -E "/mantis-rootfs-[^/]*-${variant}-[0-9a-f]+\.ext4\.gz$" | head -n 1)
+	sums=$(echo "$urls" | grep -E '/SHA256SUMS-appliance-[0-9a-f]+\.txt$' | head -n 1)
+	[ -n "$url" ] && [ -n "$sums" ] || die "no $variant rootfs in ${tag:-the latest release} of $REPO"
+	sha=$(echo "$url" | sed -E 's/.*-([0-9a-f]+)\.ext4\.gz$/\1/')
+	if [ "$sha" = "$current" ] && [ -z "$tag" ]; then
+		echo "Already on build-$current ($variant)"
+		exit 0
+	fi
+	want=$(curl -fsSL "$sums" | awk -v f="$(basename "$url")" '$2 == f || $2 == "*" f {print $1}')
+	[ -n "$want" ] || die "$(basename "$url") is not listed in $(basename "$sums")"
+	do_install "$url" "$want" "$reboot" 0
+}
+
+cmd_install() {
+	src="" want="" reboot=1 force=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--sha256) want="$2"; shift 2 ;;
+			--no-reboot) reboot=0; shift ;;
+			--force) force=1; shift ;;
+			-*) usage ;;
+			*) src="$1"; shift ;;
+		esac
+	done
+	[ -n "$src" ] || usage
+	do_install "$src" "$want" "$reboot" "$force"
+}
+
+case "${1:-status}" in
+	status) cmd_status ;;
+	latest) shift; cmd_latest "$@" ;;
+	install) shift; cmd_install "$@" ;;
+	-h|--help|help) usage ;;
+	*) usage ;;
+esac

@@ -1,0 +1,89 @@
+#!/bin/sh
+#
+# A/B upgrades, last boot step.
+# Trial boot (mantis.trial=1): wait until the new slot is healthy (Mantis
+# answers on its web UI, or simply this point of the boot when Mantis is not
+# configured), then confirm it: slot=<booted> in grubenv, watchdog disarmed.
+# Not healthy within UPGRADE_CONFIRM_SECS (appliance.conf, default 600):
+# reboot, and grub.cfg goes back to the committed slot.
+# Normal boot after a failed trial: report it, restore app.db / config.toml
+# saved by mantis-upgrade, and clear the trial state.
+
+. /usr/lib/mantis/slots.sh
+PREFIX="/opt/mantis"
+UPGRADE_CONFIRM_SECS=600
+[ -f "$PREFIX/appliance.conf" ] && . "$PREFIX/appliance.conf"
+
+healthy() {
+	[ -f "$PREFIX/config.toml" ] && [ -f "$PREFIX/appliance.conf" ] || return 0
+	port=$(sed -n -E 's/^http_server_bind_port[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$PREFIX/config.toml")
+	wget -q -S -T 5 -O /dev/null "http://127.0.0.1:${port:-8080}/" 2>&1 | grep -q 'HTTP/'
+}
+
+softdog_disarm() {
+	for w in /sys/class/watchdog/watchdog*; do
+		[ "$(cat "$w/identity" 2>/dev/null)" = "Software Watchdog" ] && printf V > "/dev/$(basename "$w")"
+	done
+}
+
+restore_pre_upgrade() {
+	for f in state/app.db config.toml; do
+		if [ -f "$PREFIX/$f.pre-upgrade" ]; then
+			[ -f "$PREFIX/$f" ] && mv -f "$PREFIX/$f" "$PREFIX/$f.failed-upgrade"
+			mv -f "$PREFIX/$f.pre-upgrade" "$PREFIX/$f"
+		fi
+	done
+}
+
+confirm_trial() {
+	booted=$(slot_booted)
+	pending=$(env_get pending)
+	elapsed=0
+	while ! healthy; do
+		if [ "$elapsed" -ge "$UPGRADE_CONFIRM_SECS" ]; then
+			upgrade_log "slot $booted ($pending) not healthy after $UPGRADE_CONFIRM_SECS s: rebooting, the previous slot takes over"
+			efi_umount
+			reboot
+			exit 0
+		fi
+		sleep 5
+		elapsed=$((elapsed + 5))
+	done
+	env_set slot="$booted" try_slot= try_count=0 pending= "last_result=$(date '+%F %T') upgraded to slot $booted: $pending"
+	efi_umount
+	: > "$MANTIS_TRIAL_CONFIRMED"
+	softdog_disarm
+	rm -f "$PREFIX/state/app.db.pre-upgrade" "$PREFIX/config.toml.pre-upgrade"
+	upgrade_log "slot $booted confirmed after ${elapsed} s: $pending is now the committed system"
+}
+
+start() {
+	efi_mount || { echo "mantis upgrade: cannot mount the EFI partition"; return 0; }
+	booted=$(slot_booted)
+	if is_trial_boot; then
+		echo "Upgrade trial of slot $booted: confirming once Mantis is up (up to $UPGRADE_CONFIRM_SECS s)"
+		confirm_trial < /dev/null > /dev/null 2>&1 &
+		return 0
+	fi
+	failed=$(env_get rollback_from)
+	try=$(env_get try_slot)
+	if [ -z "$failed" ] && [ -n "$try" ] && [ "$(env_get try_count)" = 1 ] && [ "$try" != "$booted" ]; then
+		# GRUB could not even load the trial kernel and used its fallback entry
+		failed="$try"
+	fi
+	if [ -n "$failed" ]; then
+		pending=$(env_get pending)
+		restore_pre_upgrade
+		env_set rollback_from= try_slot= try_count=0 pending= \
+			"last_result=$(date '+%F %T') upgrade to slot $failed ($pending) FAILED, rolled back to slot $booted"
+		upgrade_log "upgrade to slot $failed ($pending) did not confirm: rolled back to slot $booted, app.db / config.toml restored"
+		echo "WARNING: upgrade to slot $failed failed, running slot $booted (see mantis-upgrade status)"
+	fi
+	efi_umount
+}
+
+case "$1" in
+	start) start ;;
+	stop|restart|reload) ;;
+	*) echo "Usage: $0 {start}"; exit 1 ;;
+esac

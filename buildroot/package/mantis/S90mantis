@@ -1,0 +1,189 @@
+#!/bin/sh
+#
+# Mantis service: applies the NIC settings from /opt/mantis/appliance.conf
+# (what mantis-nic.service does on Ubuntu), keeps the fail-open bridge
+# br-mantis in place (see /usr/lib/mantis/bypass.sh) and runs
+# /opt/mantis/mantis under a supervisor that
+#   - restarts it after a crash (Restart=on-failure), backing off from 5 s up
+#     to 5 min while it keeps failing to come up;
+#   - kills it when its web UI stops answering for 30 s (hung: its XDP
+#     program would black-hole traffic), then detaches XDP so the bridge
+#     forwards until the restarted Mantis is up.
+
+PREFIX="/opt/mantis"
+CONF="$PREFIX/appliance.conf"
+PIDFILE="/var/run/mantis-supervisor.pid"
+LOG="$PREFIX/state/logs/console.log"
+. /usr/lib/mantis/bypass.sh
+
+load_conf() {
+	NIC_INGRESS="" NIC_EGRESS="" NIC_COMBINED_QUEUES="" NIC_ETHTOOL_FEATURES="" HUGEPAGES="" BYPASS="open"
+	. "$CONF"
+}
+
+apply_nic() {
+	for nic in "$NIC_INGRESS" "$NIC_EGRESS"; do
+		[ -n "$nic" ] || continue
+		ethtool -L "$nic" combined "$NIC_COMBINED_QUEUES" 2>/dev/null
+		# shellcheck disable=SC2086
+		[ -n "$NIC_ETHTOOL_FEATURES" ] && ethtool -K "$nic" $NIC_ETHTOOL_FEATURES 2>/dev/null
+		ip addr flush dev "$nic"
+		ip link set "$nic" up
+	done
+	[ -n "$HUGEPAGES" ] && sysctl -qw "vm.nr_hugepages=$HUGEPAGES"
+}
+
+log() {
+	echo "=== $(date '+%F %T') $*" >> "$LOG"
+}
+
+# Is the web UI answering? Any HTTP status counts: the process is serving.
+http_alive() {
+	wget -q -S -T 5 -O /dev/null "http://127.0.0.1:$1/" 2>&1 | grep -q 'HTTP/'
+}
+
+supervise() {
+	cd "$PREFIX" || exit 1
+	load_conf
+	ulimit -l unlimited
+	port=$(sed -n -E 's/^http_server_bind_port[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' config.toml)
+	port="${port:-8080}"
+	child=""
+	trap 'log "stopping mantis"; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null && wait "$child"
+		xdp_detach; exit 0' TERM INT
+	backoff=5
+	while :; do
+		log "starting mantis"
+		started=$(date +%s)
+		./mantis >> "$LOG" 2>&1 &
+		child=$!
+
+		# Check the process every second; once the web UI has answered,
+		# probe it every 5 s: 6 failures in a row (about 30 s) mean hung.
+		seen=0 fails=0 tick=0
+		while kill -0 "$child" 2>/dev/null; do
+			sleep 1
+			kill -0 "$child" 2>/dev/null || break
+			tick=$((tick + 1))
+			if [ "$seen" = 0 ]; then
+				if http_alive "$port"; then
+					seen=1
+					log "mantis ready after $(( $(date +%s) - started )) s"
+				elif [ "$tick" -ge 600 ]; then
+					log "mantis not ready after 10 min, killing it"
+					kill -KILL "$child" 2>/dev/null
+				fi
+				continue
+			fi
+			[ $((tick % 5)) -eq 0 ] || continue
+			if http_alive "$port"; then
+				fails=0
+			else
+				fails=$((fails + 1))
+				if [ "$fails" -ge 6 ]; then
+					log "mantis web UI not answering for 30 s, killing it (hung)"
+					kill -KILL "$child" 2>/dev/null
+				fi
+			fi
+		done
+		wait "$child"
+		status=$?
+		child=""
+		# normally already gone with the process; make sure the bridge forwards
+		xdp_detach
+
+		ran=$(( $(date +%s) - started ))
+		if [ "$ran" -ge 120 ]; then
+			backoff=5
+		elif [ "$seen" = 0 ]; then
+			# never came up: likely a config or hardware problem, retry slower
+			backoff=$((backoff * 2))
+			[ "$backoff" -gt 300 ] && backoff=300
+		fi
+		load_conf  # BYPASS may have changed meanwhile
+		if bypass_active; then
+			log "mantis exited ($status) after ${ran} s, fail-open bridge forwarding, restarting in ${backoff} s"
+		else
+			log "mantis exited ($status) after ${ran} s, NO traffic (BYPASS=closed), restarting in ${backoff} s"
+		fi
+		sleep "$backoff"
+	done
+}
+
+start() {
+	printf "Starting mantis: "
+	if [ ! -f "$PREFIX/config.toml" ] || [ ! -f "$CONF" ]; then
+		echo "not configured, run: mantis-setup"
+		return 0
+	fi
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "already running"
+		return 0
+	fi
+	if ! mountpoint -q /sys/fs/bpf; then
+		mount -t bpf bpf /sys/fs/bpf -o mode=0700 || { echo "FAIL (cannot mount bpffs)"; return 1; }
+	fi
+	load_conf
+	apply_nic
+	bridge_apply
+	# -b detaches and closes every inherited fd, so callers piping our
+	# output (mantis-setup | tail) are not held open by the supervisor.
+	start-stop-daemon -S -b -m -p "$PIDFILE" -x /bin/sh -- "$0" supervise
+	echo "OK (log: $LOG)"
+}
+
+stop() {
+	printf "Stopping mantis: "
+	[ -f "$CONF" ] && load_conf
+	if [ -f "$PIDFILE" ]; then
+		pid="$(cat "$PIDFILE")"
+		kill -TERM "$pid" 2>/dev/null
+		# TimeoutStopSec=30
+		for _ in $(seq 30); do
+			kill -0 "$pid" 2>/dev/null || break
+			sleep 1
+		done
+		kill -KILL "$pid" 2>/dev/null
+		for p in $(pidof mantis); do kill -KILL "$p" 2>/dev/null; done
+		rm -f "$PIDFILE"
+	fi
+	xdp_detach
+	# apply the current fail mode (BYPASS=closed removes the bridge)
+	[ -f "$CONF" ] && bridge_apply
+	if bypass_active; then echo "OK (fail-open: traffic bridged)"; else echo "OK"; fi
+}
+
+status() {
+	[ -f "$CONF" ] && load_conf
+	if bypass_active; then
+		bridge="fail-open bridge $MANTIS_BRIDGE up"
+	else
+		bridge="no bridge (BYPASS=closed)"
+	fi
+	if xdp_attached "$NIC_INGRESS"; then
+		path="traffic through Mantis (XDP attached)"
+	elif bypass_active; then
+		path="traffic bridged WITHOUT inspection"
+	else
+		path="NO traffic"
+	fi
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		if pidof mantis >/dev/null; then
+			echo "mantis is running (supervisor pid $(cat "$PIDFILE")); $path; $bridge"
+		else
+			echo "mantis is restarting (supervisor pid $(cat "$PIDFILE")); $path; $bridge"
+		fi
+	else
+		echo "mantis is stopped; $path; $bridge"
+		return 3
+	fi
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; start ;;
+	status) status ;;
+	supervise) supervise ;;  # internal, started by start()
+	*) echo "Usage: $0 {start|stop|restart|status}"; exit 1 ;;
+esac

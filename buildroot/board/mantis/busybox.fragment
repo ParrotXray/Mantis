@@ -1,0 +1,11 @@
+# nc: TCP/UDP debugging on the appliance
+CONFIG_NC=y
+CONFIG_NC_SERVER=y
+CONFIG_NC_EXTRA=y
+# httpd: a TCP service for test/qemu-boot-test.py to reach across the box
+CONFIG_HTTPD=y
+# stat: file details for admins
+CONFIG_STAT=y
+CONFIG_FEATURE_STAT_FORMAT=y
+# ntpd: clock sync (S42ntp)
+CONFIG_NTPD=y

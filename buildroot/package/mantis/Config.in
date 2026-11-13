@@ -1,0 +1,102 @@
+config BR2_PACKAGE_MANTIS
+	bool "mantis"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on BR2_TOOLCHAIN_USES_GLIBC
+	depends on BR2_INSTALL_LIBSTDCPP
+	# runtime libraries of the binary and of the Suricata it embeds
+	select BR2_PACKAGE_ELFUTILS
+	select BR2_PACKAGE_ZLIB
+	select BR2_PACKAGE_LIBEVENT
+	select BR2_PACKAGE_HIREDIS
+	select BR2_PACKAGE_LIBMAXMINDDB
+	select BR2_PACKAGE_FILE
+	select BR2_PACKAGE_LIBUNWIND
+	select BR2_PACKAGE_LIBCAP_NG
+	select BR2_PACKAGE_LIBNET
+	select BR2_PACKAGE_LIBNETFILTER_QUEUE
+	select BR2_PACKAGE_LIBNFNETLINK
+	select BR2_PACKAGE_JANSSON
+	select BR2_PACKAGE_LIBYAML
+	select BR2_PACKAGE_PCRE2
+	select BR2_PACKAGE_LIBPCAP
+	select BR2_PACKAGE_LZ4
+	select BR2_PACKAGE_VECTORSCAN
+	# tools used by the init scripts and mantis-setup (bash: see defconfig)
+	select BR2_PACKAGE_ETHTOOL
+	select BR2_PACKAGE_IPROUTE2
+	select BR2_PACKAGE_E2FSPROGS
+	select BR2_PACKAGE_E2FSPROGS_RESIZE2FS
+	select BR2_PACKAGE_UTIL_LINUX
+	select BR2_PACKAGE_UTIL_LINUX_BINARIES # sfdisk, lsblk
+	select BR2_PACKAGE_UTIL_LINUX_PARTX
+	# security (S22security): firewall, HTTPS front end, certificate
+	select BR2_PACKAGE_NFTABLES
+	select BR2_PACKAGE_STUNNEL
+	select BR2_PACKAGE_LIBOPENSSL
+	select BR2_PACKAGE_LIBOPENSSL_BIN
+	# A/B upgrades (mantis-upgrade latest)
+	select BR2_PACKAGE_LIBCURL
+	select BR2_PACKAGE_LIBCURL_CURL
+	help
+	  Mantis eBPF XDP + ML network security appliance, installed from
+	  a CI release of github.com/ParrotXray/Mantis.
+
+	  The release is unpacked to /usr/share/mantis-dist; at boot it is
+	  copied to /opt/mantis on the data partition, keeping config.toml
+	  and state/ (same rules as deploy.sh copy).
+
+if BR2_PACKAGE_MANTIS
+
+config BR2_PACKAGE_MANTIS_BUILD_SHA
+	string "release build sha"
+	default "b8c76069"
+	help
+	  The release tag is build-<sha>. buildroot/build.sh fills this in
+	  from the latest release.
+
+config BR2_PACKAGE_MANTIS_APP_VERSION
+	string "release app version"
+	default "0.1.0"
+	help
+	  Version in the asset name: mantis-<version>-<variant>-<sha>.tar.gz
+
+choice
+	prompt "release variant"
+	default BR2_PACKAGE_MANTIS_VARIANT_AVX2 if BR2_x86_64
+	default BR2_PACKAGE_MANTIS_VARIANT_AARCH64 if BR2_aarch64
+
+config BR2_PACKAGE_MANTIS_VARIANT_AVX512
+	bool "linux-amd64-avx512 (x86-64-v4)"
+	depends on BR2_x86_64
+
+config BR2_PACKAGE_MANTIS_VARIANT_AVX2
+	bool "linux-amd64-avx2 (x86-64-v3)"
+	depends on BR2_x86_64
+
+config BR2_PACKAGE_MANTIS_VARIANT_AVX
+	bool "linux-amd64-avx (Sandy Bridge)"
+	depends on BR2_x86_64
+
+config BR2_PACKAGE_MANTIS_VARIANT_BASELINE
+	bool "linux-amd64-baseline (x86-64)"
+	depends on BR2_x86_64
+
+config BR2_PACKAGE_MANTIS_VARIANT_AARCH64
+	bool "linux-aarch64"
+	depends on BR2_aarch64
+
+endchoice
+
+config BR2_PACKAGE_MANTIS_VARIANT
+	string
+	default "linux-amd64-avx512" if BR2_PACKAGE_MANTIS_VARIANT_AVX512
+	default "linux-amd64-avx2" if BR2_PACKAGE_MANTIS_VARIANT_AVX2
+	default "linux-amd64-avx" if BR2_PACKAGE_MANTIS_VARIANT_AVX
+	default "linux-amd64-baseline" if BR2_PACKAGE_MANTIS_VARIANT_BASELINE
+	default "linux-aarch64" if BR2_PACKAGE_MANTIS_VARIANT_AARCH64
+
+endif
+
+comment "mantis needs a glibc toolchain w/ C++"
+	depends on BR2_x86_64 || BR2_aarch64
+	depends on !BR2_TOOLCHAIN_USES_GLIBC || !BR2_INSTALL_LIBSTDCPP

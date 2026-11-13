@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# Trial boot of a freshly upgraded slot (mantis.trial=1 from grub.cfg): arm
+# the software watchdog as a deadline, as early as possible. Nothing feeds
+# it; S99upgrade disarms it once the new slot is confirmed. If the boot hangs
+# anywhere before that, the watchdog reboots after softdog.soft_margin
+# (900 s) and grub.cfg rolls back to the committed slot.
+
+. /usr/lib/mantis/slots.sh
+
+# the software watchdog, never a hardware one with its own (short) timeout
+softdog_dev() {
+	for w in /sys/class/watchdog/watchdog*; do
+		[ "$(cat "$w/identity" 2>/dev/null)" = "Software Watchdog" ] && { echo "/dev/$(basename "$w")"; return 0; }
+	done
+	return 1
+}
+
+case "$1" in
+	start)
+		is_trial_boot || exit 0
+		printf "Upgrade trial boot (slot %s): arming the rollback watchdog: " "$(slot_booted)"
+		if dev=$(softdog_dev); then
+			# open, write, close without the magic 'V': the timer keeps running
+			printf 1 > "$dev" && echo "OK ($dev, $(cat /sys/class/watchdog/"$(basename "$dev")"/timeout) s)"
+		else
+			echo "no software watchdog, relying on S99upgrade's timeout"
+		fi
+		;;
+	stop|restart|reload) ;;
+	*) echo "Usage: $0 {start}"; exit 1 ;;
+esac

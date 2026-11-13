@@ -1,0 +1,12 @@
+#!/bin/sh
+# BusyBox ntpd -S hook: $1 is "unsync", "step", "stratum" or "periodic".
+case "$1" in
+	step|stratum|periodic)
+		[ -e /run/ntp-synced ] || logger -t ntpd "clock synchronized (stratum ${stratum:-?})"
+		date '+%F %T %Z' > /run/ntp-synced
+		hwclock -w -u 2>/dev/null
+		;;
+	unsync)
+		rm -f /run/ntp-synced
+		;;
+esac

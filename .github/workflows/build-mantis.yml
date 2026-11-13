@@ -212,3 +212,11 @@ jobs:
             --jq '.artifacts[].id' | while read -r id; do
               gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"
             done
+
+  appliance:
+    needs: [check-version, release]
+    uses: ./.github/workflows/build-appliance.yml
+    with:
+      sha: ${{ needs.check-version.outputs.sha }}
+    permissions:
+      contents: write

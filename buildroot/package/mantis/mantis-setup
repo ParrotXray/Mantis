@@ -1,0 +1,330 @@
+#!/bin/bash
+#
+# mantis-setup: first-time configuration of the Mantis appliance.
+# The Buildroot counterpart of deploy.sh's NIC / hugepages / config.toml
+# steps (no apt, netplan or systemd here). Writes, on the data partition:
+#   /opt/mantis/appliance.conf    NIC + management network settings (boot scripts)
+#   /opt/mantis/config.toml       Mantis configuration
+#   /opt/mantis/appliance.shadow  root password hash
+#   /opt/mantis/ssh/authorized_keys  root's SSH keys
+#   /opt/mantis/wpa_supplicant.conf  WiFi network, when the management NIC is wireless
+
+set -euo pipefail
+
+PREFIX="/opt/mantis"
+CONF="$PREFIX/appliance.conf"
+
+RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' BLUE='\033[0;34m' NC='\033[0m'
+log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
+log_ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
+log_warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
+log_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+
+# Input ending (e.g. a piped answer file that is too short) aborts instead of
+# spinning in a validation loop.
+input_ended() { echo >&2; log_err "input ended before setup was complete"; exit 1; }
+
+ask() {
+	local prompt="$1" default="$2" reply
+	read -r -p "$prompt [$default]: " reply || input_ended
+	echo "${reply:-$default}"
+}
+
+confirm() {
+	local prompt="$1" default="${2:-y}" reply
+	read -r -p "$prompt [$([[ $default == y ]] && echo Y/n || echo y/N)]: " reply || input_ended
+	reply="${reply:-$default}"
+	[[ "$reply" =~ ^[Yy]$ ]]
+}
+
+ask_nic() {
+	local prompt="$1" default="$2" nic
+	while true; do
+		nic=$(ask "$prompt" "$default")
+		[[ -n "$nic" && -e "/sys/class/net/$nic" ]] && { echo "$nic"; return; }
+		log_err "no interface named '$nic'" >&2
+	done
+}
+
+set_toml_value() {
+	local key="$1" value="$2" file="$3"
+	sed -i -E "s|^(${key}[[:space:]]*=[[:space:]]*)[^#]+|\1${value} |" "$file"
+}
+
+rand_hex() { head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n'; }
+
+[[ $EUID -eq 0 ]] || { log_err "run as root"; exit 1; }
+mountpoint -q "$PREFIX" || log_warn "$PREFIX is not the data partition; settings will not survive a rootfs upgrade"
+[[ -f "$PREFIX/config.toml.example" ]] || { log_err "$PREFIX/config.toml.example missing (S20data did not run?)"; exit 1; }
+
+# Previous answers become the defaults
+MGMT_IF="" MGMT_MODE="dhcp" MGMT_ADDR="" MGMT_GW="" MGMT_DNS="" MGMT_WIFI=0 MGMT_WIFI_COUNTRY=""
+TIMEZONE="" NTP_SERVERS="pool.ntp.org" SSH_PASSWORD="yes" MGMT_ALLOW="" FIREWALL="on" HTTPS_PORT="443" WEB_HTTP="0"
+NIC_INGRESS="" NIC_EGRESS="" NIC_COMBINED_QUEUES="" NIC_ETHTOOL_FEATURES="" HUGEPAGES="" BYPASS="open"
+[[ -f "$CONF" ]] && . "$CONF"
+WPA_CONF="$PREFIX/wpa_supplicant.conf"
+
+is_wireless() { [[ -d "/sys/class/net/$1/wireless" || -e "/sys/class/net/$1/phy80211" ]]; }
+
+ask_secret() {
+	local prompt="$1" reply
+	read -r -s -p "$prompt: " reply || input_ended
+	echo >&2
+	echo "$reply"
+}
+
+echo
+log_info "Network interfaces:"
+ip -brief link show | awk '$1 != "lo" {print "  " $0}' | while read -r line; do
+	nic=$(awk '{print $1}' <<<"$line")
+	is_wireless "$nic" && echo "$line   (WiFi)" || echo "$line"
+done
+echo
+
+# --- 1. Management network ---------------------------------------------------
+MGMT_IF=$(ask_nic "Management NIC (SSH and web UI; wired or WiFi)" "$MGMT_IF")
+if is_wireless "$MGMT_IF"; then
+	MGMT_WIFI=1
+	rfkill unblock wifi 2>/dev/null || true
+	ip link set "$MGMT_IF" up
+	log_info "Scanning for WiFi networks on $MGMT_IF ..."
+	iw dev "$MGMT_IF" scan 2>/dev/null | sed -n 's/^[[:space:]]*SSID: \(..*\)$/  \1/p' | sort -u | head -20 || true
+	old_ssid=$(sed -n 's/^[[:space:]]*# ssid: //p' "$WPA_CONF" 2>/dev/null || true)
+	while true; do
+		ssid=$(ask "WiFi network name (SSID)" "$old_ssid")
+		[[ -n "$ssid" ]] && break
+	done
+	pass=$(ask_secret "WiFi password (empty for an open network)")
+	if [[ -n "$pass" && ( ${#pass} -lt 8 || ${#pass} -gt 63 ) ]]; then
+		log_err "WPA passwords are 8 to 63 characters"
+		exit 1
+	fi
+	MGMT_WIFI_COUNTRY=$(ask "WiFi country code, e.g. US, DE, JP, TW (empty: world rules, fewer 5 GHz channels)" "$MGMT_WIFI_COUNTRY")
+	MGMT_WIFI_COUNTRY="${MGMT_WIFI_COUNTRY^^}"
+	ssid_hex=$(printf '%s' "$ssid" | od -An -tx1 | tr -d ' \n')
+	umask 077
+	{
+		echo "ctrl_interface=/var/run/wpa_supplicant"
+		[[ -n "$MGMT_WIFI_COUNTRY" ]] && echo "country=$MGMT_WIFI_COUNTRY"
+		echo "network={"
+		echo "	# ssid: $ssid"
+		echo "	ssid=$ssid_hex"
+		if [[ -n "$pass" ]]; then
+			# WPA2 and WPA3 (SAE) with the same passphrase
+			echo "	psk=\"$pass\""
+			echo "	key_mgmt=WPA-PSK WPA-PSK-SHA256 SAE"
+			echo "	ieee80211w=1"
+		else
+			echo "	key_mgmt=NONE"
+		fi
+		echo "}"
+	} > "$WPA_CONF"
+	umask 022
+	log_ok "$WPA_CONF written"
+else
+	MGMT_WIFI=0
+fi
+while true; do
+	MGMT_MODE=$(ask "Management address: dhcp | static" "$MGMT_MODE")
+	[[ "$MGMT_MODE" =~ ^(dhcp|static)$ ]] && break
+done
+if [[ "$MGMT_MODE" == static ]]; then
+	MGMT_ADDR=$(ask "Address/prefix (e.g. 192.168.1.10/24)" "$MGMT_ADDR")
+	MGMT_GW=$(ask "Default gateway (empty for none)" "$MGMT_GW")
+	MGMT_DNS=$(ask "DNS servers, comma-separated (empty for none)" "$MGMT_DNS")
+fi
+
+# --- 2. Inspection NICs (deploy.sh step_nic) ---------------------------------
+while true; do
+	NIC_INGRESS=$(ask_nic "Ingress NIC (external/inbound)" "$NIC_INGRESS")
+	NIC_EGRESS=$(ask_nic "Egress NIC (internal/outbound)" "$NIC_EGRESS")
+	if [[ "$NIC_INGRESS" == "$NIC_EGRESS" || "$NIC_INGRESS" == "$MGMT_IF" || "$NIC_EGRESS" == "$MGMT_IF" ]]; then
+		log_err "ingress, egress and management NIC must all differ"
+		continue
+	fi
+	if is_wireless "$NIC_INGRESS" || is_wireless "$NIC_EGRESS"; then
+		log_err "ingress and egress must be wired NICs (WiFi only works as the management NIC)"
+		continue
+	fi
+	break
+done
+max_q=""
+for nic in "$NIC_INGRESS" "$NIC_EGRESS"; do
+	log_info "$nic driver: $(ethtool -i "$nic" 2>/dev/null | awk -F': ' '$1 == "driver" {print $2}')"
+	q=$(ethtool -l "$nic" 2>/dev/null | awk '/^Pre-set maximums/ {m=1} m && /^Combined:/ {print $2; exit}')
+	[[ "$q" =~ ^[0-9]+$ ]] || q=1
+	[[ -z "$max_q" || $q -lt $max_q ]] && max_q=$q
+done
+cpus=$(nproc)
+default_q=${NIC_COMBINED_QUEUES:-$(( max_q < cpus ? max_q : cpus ))}
+log_info "Both NICs support up to $max_q combined queues; this machine has $cpus cores"
+NIC_COMBINED_QUEUES=$(ask "combined_queue_count" "$default_q")
+for nic in "$NIC_INGRESS" "$NIC_EGRESS"; do
+	ethtool -L "$nic" combined "$NIC_COMBINED_QUEUES" && log_ok "$nic combined queues set to $NIC_COMBINED_QUEUES"
+done
+
+while true; do
+	XDP_MODE=$(ask "xdp_mode (auto: native, falling back to generic | native | generic)" "auto")
+	[[ "$XDP_MODE" =~ ^(auto|native|generic)$ ]] && break
+	log_err "xdp_mode must be auto, native or generic"
+done
+features=()
+gro_default="y"
+[[ "$XDP_MODE" == "native" ]] && gro_default="n"
+if confirm "Turn GRO off (needed for generic XDP: merged packets larger than frame_size are dropped)" "$gro_default"; then
+	features+=(gro off)
+fi
+if confirm "Does the link carry VLAN-tagged traffic (trunk)? Turns rx VLAN offload off so tags are kept" "n"; then
+	features+=(rxvlan off)
+fi
+NIC_ETHTOOL_FEATURES="${features[*]}"
+
+# Fail-open: what happens to traffic while Mantis is not running
+log_info "While Mantis is not running (boot, restart, crash, hang):"
+log_info "  open   = $NIC_INGRESS and $NIC_EGRESS are ports of the bridge br-mantis; Mantis' XDP takes"
+log_info "           every frame while it runs, the bridge forwards (WITHOUT inspection) when it does not"
+log_info "  closed = no bridge: nothing crosses the box until Mantis is back"
+while true; do
+	BYPASS=$(ask "Fail mode: open | closed" "$BYPASS")
+	[[ "$BYPASS" =~ ^(open|closed)$ ]] && break
+done
+
+# --- 3. Hugepages (deploy.sh step_hugepages) ---------------------------------
+FRAME_SIZE=$(ask "UMEM frame_size (bytes, 2048 or 4096)" "4096")
+FRAME_COUNT=$(ask "UMEM frame_count per XskPair (power of 2)" "8192")
+pages_per_pair=$(( FRAME_SIZE * FRAME_COUNT / (2 * 1024 * 1024) ))
+HUGEPAGES=$(( NIC_COMBINED_QUEUES * 2 * pages_per_pair ))
+log_info "Required hugepages: $NIC_COMBINED_QUEUES queues x 2 NICs x $pages_per_pair = $HUGEPAGES ($(( HUGEPAGES * 2 )) MiB)"
+HUGEPAGES=$(ask "vm.nr_hugepages to set" "$HUGEPAGES")
+
+# --- 4. config.toml (deploy.sh step_config_toml) -----------------------------
+write_config=1
+if [[ -f "$PREFIX/config.toml" ]] && ! confirm "$PREFIX/config.toml already exists, overwrite it" "n"; then
+	write_config=0
+	log_info "Keeping existing $PREFIX/config.toml"
+fi
+if [[ $write_config -eq 1 ]]; then
+	tmp=$(mktemp)
+	cp "$PREFIX/config.toml.example" "$tmp"
+	set_toml_value "ingress_ifname" "\"$NIC_INGRESS\"" "$tmp"
+	set_toml_value "egress_ifname" "\"$NIC_EGRESS\"" "$tmp"
+	set_toml_value "combined_queue_count" "$NIC_COMBINED_QUEUES" "$tmp"
+	set_toml_value "xdp_mode" "\"$XDP_MODE\"" "$tmp"
+	[[ "$XDP_MODE" == "generic" ]] && set_toml_value "xsk_bind_mode" "\"copy\"" "$tmp"
+	set_toml_value "frame_size" "$FRAME_SIZE" "$tmp"
+	set_toml_value "frame_count" "$FRAME_COUNT" "$tmp"
+	# Mantis refuses fill_queue_size > frame_count (the example has 8192)
+	fill=$(sed -n -E 's/^fill_queue_size[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' "$tmp")
+	if [[ -n "$fill" && $fill -gt $FRAME_COUNT ]]; then
+		set_toml_value "fill_queue_size" "$FRAME_COUNT" "$tmp"
+		log_info "fill_queue_size lowered from $fill to $FRAME_COUNT (must be <= frame_count)"
+	fi
+
+	# CPU defaults scaled from deploy.sh's 8-core layout
+	last=$(( cpus - 1 )); half=$(( cpus / 2 ))
+	xsk_start=$(ask "xsk_cpu_set start core" "0")
+	xsk_end=$(ask "xsk_cpu_set end core" "$half")
+	set_toml_value "xsk_cpu_set" "[$xsk_start, $xsk_end]" "$tmp"
+	set_toml_value "ml_cpu" "$(ask "ml_cpu core" "$last")" "$tmp"
+	set_toml_value "http_server_bind_port" "$(ask "http_server_bind_port" "8080")" "$tmp"
+	set_toml_value "refresh_interval" "$(ask "refresh_interval (seconds)" "5")" "$tmp"
+	home_net=$(ask "home_net CIDR (comma-separated for multiple)" "192.168.1.0/24")
+	home_net=$(echo "$home_net" | sed -E 's/[[:space:]]*,[[:space:]]*/,/g; s/^[[:space:]]+|[[:space:]]+$//g')
+	home_net=$(echo "$home_net" | sed -E 's/([^,]+)/"\1"/g')
+	set_toml_value "home_net" "[$home_net]" "$tmp"
+	worker_start=$(ask "suricata worker_cpu_set start core" "$half")
+	worker_end=$(ask "suricata worker_cpu_set end core" "$(( last > half ? last - 1 : last ))")
+	set_toml_value "worker_cpu_set" "[$worker_start, $worker_end]" "$tmp"
+	set_toml_value "management_cpu" "$(ask "suricata management_cpu" "0")" "$tmp"
+	set_toml_value "jwt_secret" "\"$(rand_hex)\"" "$tmp"
+	set_toml_value "db_key" "\"$(rand_hex)\"" "$tmp"
+	install -m 600 "$tmp" "$PREFIX/config.toml"
+	rm -f "$tmp"
+	log_ok "$PREFIX/config.toml written (new jwt_secret and db_key)"
+fi
+
+# --- 5. System: time, SSH, management access ----------------------------------
+TIMEZONE="${TIMEZONE:-UTC}"
+while true; do
+	TIMEZONE=$(ask "Time zone, e.g. Asia/Taipei, Europe/Berlin, America/New_York" "$TIMEZONE")
+	[[ -f "/usr/share/zoneinfo/$TIMEZONE" ]] && break
+	log_err "unknown time zone '$TIMEZONE' (see ls /usr/share/zoneinfo)"
+done
+NTP_SERVERS=$(ask "NTP servers, space-separated ('off' to disable)" "$NTP_SERVERS")
+
+keys="$PREFIX/ssh/authorized_keys"
+install -d -m 700 "$PREFIX/ssh"
+nkeys=$(grep -cE '^(ssh-|ecdsa-)' "$keys" 2>/dev/null || true)
+log_info "SSH keys for root: ${nkeys:-0} installed"
+key=$(ask "Paste an SSH public key to add (ssh-ed25519 / ssh-rsa / ecdsa-..., empty to skip)" "")
+if [[ -n "$key" ]]; then
+	if [[ "$key" =~ ^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+)\ [A-Za-z0-9+/=]+ ]]; then
+		grep -qxF "$key" "$keys" 2>/dev/null || echo "$key" >> "$keys"
+		chmod 600 "$keys"
+		log_ok "SSH key added to $keys"
+	else
+		log_err "that does not look like an SSH public key, not added"
+	fi
+fi
+if grep -qE '^(ssh-|ecdsa-)' "$keys" 2>/dev/null; then
+	# with a key, password logins default to off
+	[[ -n "$key" ]] && SSH_PASSWORD=no
+	if confirm "Allow password logins over SSH as well (keys are safer)" "$([[ $SSH_PASSWORD == yes ]] && echo y || echo n)"; then
+		SSH_PASSWORD=yes
+	else
+		SSH_PASSWORD=no
+	fi
+else
+	SSH_PASSWORD=yes
+	log_warn "no SSH key installed: SSH accepts the root password"
+fi
+log_info "The management firewall allows SSH (22) and the web UI over HTTPS ($HTTPS_PORT) only."
+MGMT_ALLOW=$(ask "Networks allowed to reach them, space-separated CIDRs (empty: any)" "$MGMT_ALLOW")
+
+# --- 6. appliance.conf -------------------------------------------------------
+umask 077
+cat > "$CONF" <<EOF
+# Written by mantis-setup; read by the /etc/init.d/S* scripts
+MGMT_IF="$MGMT_IF"
+MGMT_MODE="$MGMT_MODE"
+MGMT_ADDR="$MGMT_ADDR"
+MGMT_GW="$MGMT_GW"
+MGMT_DNS="$MGMT_DNS"
+MGMT_WIFI="$MGMT_WIFI"
+MGMT_WIFI_COUNTRY="$MGMT_WIFI_COUNTRY"
+NIC_INGRESS="$NIC_INGRESS"
+NIC_EGRESS="$NIC_EGRESS"
+NIC_COMBINED_QUEUES="$NIC_COMBINED_QUEUES"
+NIC_ETHTOOL_FEATURES="$NIC_ETHTOOL_FEATURES"
+HUGEPAGES="$HUGEPAGES"
+BYPASS="$BYPASS"
+TIMEZONE="$TIMEZONE"
+NTP_SERVERS="$NTP_SERVERS"
+SSH_PASSWORD="$SSH_PASSWORD"
+MGMT_ALLOW="$MGMT_ALLOW"
+FIREWALL="$FIREWALL"
+HTTPS_PORT="$HTTPS_PORT"
+WEB_HTTP="$WEB_HTTP"
+EOF
+umask 022
+log_ok "$CONF written"
+
+# --- 7. root password --------------------------------------------------------
+if [[ ! -s "$PREFIX/appliance.shadow" ]] || confirm "Change the root password" "n"; then
+	log_info "Set the root password (needed for SSH)"
+	passwd root
+	awk -F: '$1 == "root" {print $2}' /etc/shadow > "$PREFIX/appliance.shadow"
+	chmod 600 "$PREFIX/appliance.shadow"
+fi
+
+# --- 8. Activate -------------------------------------------------------------
+if confirm "Apply the settings and (re)start Mantis now" "y"; then
+	/etc/init.d/S22security restart
+	/etc/init.d/S41mgmt-net restart
+	/etc/init.d/S42ntp restart
+	/etc/init.d/S90mantis restart
+	log_ok "Mantis running: /etc/init.d/S90mantis status, tail -f $PREFIX/state/logs/console.log"
+	log_ok "Web UI: https://<management address>:$HTTPS_PORT/ (self-signed certificate: $PREFIX/tls/mantis.crt)"
+else
+	echo "When ready: for s in S22security S41mgmt-net S42ntp S90mantis; do /etc/init.d/\$s restart; done"
+fi

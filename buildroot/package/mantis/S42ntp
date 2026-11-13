@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# Clock sync with BusyBox ntpd, from /opt/mantis/appliance.conf:
+#   NTP_SERVERS="pool.ntp.org"   space-separated; "off" disables ntpd
+# Alert timestamps, login token expiry and the per-day record files all
+# depend on the clock. Once synced, the hardware clock is updated too, so the
+# time is right after a reboot even before the network is up.
+
+CONF="/opt/mantis/appliance.conf"
+PIDFILE="/var/run/ntpd.pid"
+
+start() {
+	printf "Starting ntpd: "
+	NTP_SERVERS="pool.ntp.org"
+	[ -f "$CONF" ] && . "$CONF"
+	if [ "$NTP_SERVERS" = off ] || [ -z "$NTP_SERVERS" ]; then
+		echo "off"
+		return 0
+	fi
+	peers=""
+	for s in $NTP_SERVERS; do
+		peers="$peers -p $s"
+	done
+	# shellcheck disable=SC2086
+	start-stop-daemon -S -b -m -p "$PIDFILE" -x /usr/sbin/ntpd -- -n $peers -S /usr/sbin/mantis-ntp-event
+	echo "OK ($NTP_SERVERS)"
+}
+
+stop() {
+	printf "Stopping ntpd: "
+	start-stop-daemon -K -q -p "$PIDFILE" 2>/dev/null
+	rm -f "$PIDFILE"
+	# keep the hardware clock as close as possible for the next boot
+	[ -e /run/ntp-synced ] && hwclock -w -u 2>/dev/null
+	echo "OK"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

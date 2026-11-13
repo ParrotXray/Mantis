@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# Fail-open from early boot: as soon as the data partition (and so
+# appliance.conf) is mounted, put the ingress and egress NIC in the
+# permanent bridge br-mantis, so traffic flows until Mantis attaches XDP.
+
+CONF="/opt/mantis/appliance.conf"
+. /usr/lib/mantis/bypass.sh
+
+case "$1" in
+	start)
+		printf "Mantis fail-open bridge: "
+		NIC_INGRESS="" NIC_EGRESS="" BYPASS="open"
+		[ -f "$CONF" ] && . "$CONF"
+		if [ -z "$NIC_INGRESS" ]; then
+			echo "not configured"
+		elif ! bypass_enabled; then
+			echo "off (BYPASS=$BYPASS)"
+		elif bridge_apply; then
+			bypass_log "boot: fail-open bridge up, forwarding until Mantis attaches XDP"
+			echo "$NIC_INGRESS <-> $NIC_EGRESS bridged"
+		else
+			echo "FAIL"
+		fi
+		;;
+	stop|restart|reload) ;;
+	*) echo "Usage: $0 {start}"; exit 1 ;;
+esac

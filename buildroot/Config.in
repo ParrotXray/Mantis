@@ -1,0 +1,4 @@
+menu "Mantis appliance"
+	source "$BR2_EXTERNAL_MANTIS_PATH/package/vectorscan/Config.in"
+	source "$BR2_EXTERNAL_MANTIS_PATH/package/mantis/Config.in"
+endmenu

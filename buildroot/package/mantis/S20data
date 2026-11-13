@@ -1,0 +1,96 @@
+#!/bin/sh
+#
+# Mount the Mantis data partition (label mantis-data) on /opt/mantis,
+# grow it to the end of the disk on first boot, and link the release
+# shipped in the rootfs (/usr/share/mantis-dist) into it.
+#
+# The data partition keeps everything that must survive a rootfs upgrade:
+# config.toml, state/ (app.db, records, logs, rules) and appliance.conf.
+
+LABEL="mantis-data"
+MNT="/opt/mantis"
+DIST="/usr/share/mantis-dist"
+
+grow_data() {
+	dev="$1"
+	disk="/dev/$(lsblk -no PKNAME "$dev")"
+	part="$(cat "/sys/class/block/$(basename "$dev")/partition")"
+	[ -b "$disk" ] && [ -n "$part" ] || return 1
+	# The image was written to a larger disk: move the GPT backup header
+	# to the real end, then let the last partition take the free space.
+	sfdisk --relocate gpt-bak-std "$disk" >/dev/null 2>&1
+	echo ", +" | sfdisk --no-reread --no-tell-kernel -N "$part" "$disk" >/dev/null 2>&1
+	partx -u -n "$part" "$disk"
+	e2fsck -fp "$dev" >/dev/null 2>&1
+	resize2fs "$dev" >/dev/null 2>&1
+}
+
+link_dist() {
+	install -d -m 755 "$MNT/state"
+	install -d -m 750 "$MNT/state/rules" "$MNT/state/records" "$MNT/state/logs"
+	# Mantis finds config.toml and state/ next to its executable
+	# (std::env::current_exe, which resolves symlinks), so the binary and
+	# share/ are bind-mounted rather than symlinked: /proc/self/exe then
+	# reads /opt/mantis/mantis, as in a deploy.sh install.
+	for name in mantis share; do
+		[ -e "$DIST/$name" ] || continue
+		grep -q " $MNT/$name " /proc/mounts && continue
+		[ -L "$MNT/$name" ] && rm -f "$MNT/$name"
+		if [ -d "$DIST/$name" ]; then
+			mkdir -p "$MNT/$name"
+		else
+			[ -e "$MNT/$name" ] || : > "$MNT/$name"
+		fi
+		mount --bind "$DIST/$name" "$MNT/$name"
+		mount -o remount,bind,ro "$MNT/$name"
+	done
+	for name in config.toml.example deploy.sh; do
+		[ -e "$DIST/$name" ] || continue
+		ln -sfn "$DIST/$name" "$MNT/$name"
+	done
+	# Seed rule files that are neither present nor disabled (as deploy.sh copy)
+	for rule in "$DIST"/state/rules/*; do
+		[ -f "$rule" ] || continue
+		name="$(basename "$rule")"
+		if [ ! -e "$MNT/state/rules/$name" ] && [ ! -e "$MNT/state/rules/$name.disabled" ]; then
+			install -m 640 "$rule" "$MNT/state/rules/$name"
+		fi
+	done
+}
+
+start() {
+	printf "Mounting Mantis data partition: "
+	dev="$(findfs "LABEL=$LABEL" 2>/dev/null)"
+	if [ -z "$dev" ]; then
+		echo "no partition labelled $LABEL, using the rootfs"
+		mkdir -p "$MNT"
+		link_dist
+		return 0
+	fi
+	mkdir -p "$MNT"
+	if ! mount -t ext4 -o noatime "$dev" "$MNT"; then
+		echo "FAIL"
+		return 1
+	fi
+	# First boot: grow the partition while it is unmounted, only once
+	if [ ! -e "$MNT/.grown" ]; then
+		umount "$MNT"
+		grow_data "$dev"
+		mount -t ext4 -o noatime "$dev" "$MNT" || { echo "FAIL"; return 1; }
+		touch "$MNT/.grown"
+	fi
+	link_dist
+	# Root password set by mantis-setup survives a rootfs upgrade
+	if [ -s "$MNT/appliance.shadow" ]; then
+		hash="$(cat "$MNT/appliance.shadow")"
+		sed -i "s|^root:[^:]*:|root:$hash:|" /etc/shadow
+	fi
+	echo "OK ($dev, $(df -h "$MNT" | awk 'NR==2 {print $2}'))"
+}
+
+case "$1" in
+	start) start ;;
+	stop) umount "$MNT/mantis" "$MNT/share" 2>/dev/null; sync ;;
+	restart|reload) ;;
+	*) echo "Usage: $0 {start|stop}"; exit 1 ;;
+esac
