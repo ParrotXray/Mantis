@@ -27,6 +27,10 @@ O="${O:-$HERE/output}"
 MANTIS_SHA="${MANTIS_SHA:-$(cat "$REPO/.last-built-version")}"
 MANTIS_VARIANT="${MANTIS_VARIANT:-avx2}"
 
+# Buildroot runs the post-build / post-image hooks directly. Files uploaded
+# through the GitHub web UI lose their execute bit, so set it here.
+chmod +x "$HERE"/board/mantis/*/*.sh
+
 if [[ ! -d "$BR_SRC" ]]; then
 	git clone --depth 1 -b "$BR_VERSION" https://gitlab.com/buildroot.org/buildroot.git "$BR_SRC"
 fi

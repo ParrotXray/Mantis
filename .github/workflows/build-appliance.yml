@@ -92,7 +92,7 @@ jobs:
           MANTIS_VARIANT: baseline
         run: |
           export BR2_DL_DIR="$HOME/br-dl" BR_CCACHE_DIR="$HOME/br-ccache"
-          buildroot/build.sh BR2_JLEVEL="$(nproc)" > build.log 2>&1 || { tail -100 build.log; exit 1; }
+          bash buildroot/build.sh BR2_JLEVEL="$(nproc)" > build.log 2>&1 || { tail -100 build.log; exit 1; }
           grep -E '^check-needed' build.log
           mkdir -p dist
           cp buildroot/output/images/disk.img.gz "dist/mantis-appliance-${MANTIS_APP_VERSION}-linux-amd64-baseline-${MANTIS_SHA}.img.gz"
@@ -111,7 +111,7 @@ jobs:
           export BR2_DL_DIR="$HOME/br-dl" BR_CCACHE_DIR="$HOME/br-ccache"
           # same rootfs, only the mantis package and the image are rebuilt
           for v in avx avx2 avx512; do
-            MANTIS_VARIANT=$v buildroot/build.sh BR2_JLEVEL="$(nproc)" > "build-$v.log" 2>&1 \
+            MANTIS_VARIANT=$v bash buildroot/build.sh BR2_JLEVEL="$(nproc)" > "build-$v.log" 2>&1 \
               || { tail -100 "build-$v.log"; exit 1; }
             cp buildroot/output/images/disk.img.gz "dist/mantis-appliance-${MANTIS_APP_VERSION}-linux-amd64-${v}-${MANTIS_SHA}.img.gz"
             cp buildroot/output/images/rootfs.ext4.gz "dist/mantis-rootfs-${MANTIS_APP_VERSION}-linux-amd64-${v}-${MANTIS_SHA}.ext4.gz"
