@@ -10,6 +10,17 @@
 CONF="/opt/mantis/appliance.conf"
 WPA_CONF="/opt/mantis/wpa_supplicant.conf"
 
+# Slow steps (up to a minute in all) say what they wait for, so the boot
+# console does not look hung or as if it waited for input.
+note() {
+	printf '\n  %s' "$*"
+}
+
+# IPv4 addresses of an interface, e.g. "192.168.1.23/24"
+addr_of() {
+	ip -4 -o addr show dev "$1" 2>/dev/null | awk '{printf "%s%s", sep, $4; sep=" "}'
+}
+
 dhcp() {
 	ip link set "$1" up
 	udhcpc -b -t 5 -T 2 -i "$1" -p "/var/run/udhcpc.$1.pid" >/dev/null 2>&1
@@ -21,6 +32,8 @@ is_wireless() {
 
 # WiFi drivers are modules loaded by eudev; the interface can show up late
 wait_for_if() {
+	[ -e "/sys/class/net/$1" ] && return 0
+	note "waiting for $1 to show up (up to 20 s)..."
 	for _ in $(seq 20); do
 		[ -e "/sys/class/net/$1" ] && return 0
 		sleep 1
@@ -30,6 +43,8 @@ wait_for_if() {
 
 wifi_up() {
 	rfkill unblock wifi 2>/dev/null
+	ssid="$(sed -n 's/^[[:space:]]*# ssid: //p' "$WPA_CONF" 2>/dev/null | head -n 1)"
+	note "$1: connecting to WiFi \"$ssid\" (up to 30 s)..."
 	ip link set "$1" up
 	wpa_supplicant -B -D nl80211 -i "$1" -c "$WPA_CONF" \
 		-P "/var/run/wpa_supplicant.$1.pid" >/dev/null 2>&1 || return 1
@@ -51,9 +66,13 @@ start() {
 			[ "$nic" = lo ] && continue
 			[ -e "$path/device" ] || continue
 			is_wireless "$nic" && continue  # no credentials yet
+			note "$nic: requesting a DHCP address (up to 10 s)..."
 			dhcp "$nic"
+			got="$(addr_of "$nic")"
+			printf ' %s' "${got:-no answer yet, keeps trying in the background}"
 		done
-		echo "DHCP on all wired NICs (run mantis-setup to pick the management NIC)"
+		echo
+		echo "Starting management network: DHCP on all wired NICs (run mantis-setup to pick the management NIC)"
 		return 0
 	fi
 
@@ -81,8 +100,11 @@ start() {
 		fi
 		echo "$MGMT_IF $MGMT_ADDR"
 	else
+		note "$MGMT_IF: requesting a DHCP address (up to 10 s)..."
 		dhcp "$MGMT_IF"
-		echo "$MGMT_IF DHCP"
+		got="$(addr_of "$MGMT_IF")"
+		echo
+		echo "Starting management network: $MGMT_IF DHCP ${got:-(no answer yet, keeps trying in the background)}"
 	fi
 }
 
