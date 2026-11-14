@@ -3,6 +3,9 @@
 ## Project Overview
 **Mantis** is a high-performance network security solution that combines eBPF XDP technology with deep learning models to provide advanced network protection. The system operates as a standalone network appliance that can run on any Ubuntu-based system with compatible network hardware.
 
+## System Traffic Overview
+<img width="2886" height="1161" alt="image" src="https://github.com/user-attachments/assets/9571f3b3-d5b1-4dbe-a158-60c6451ac90e" />
+
 ## Core Technologies
 - **eBPF XDP Technology** - Provides high-performance packet processing directly at the data link layer
 - **Deep Learning Models** - Identifies and predicts potential network attacks with intelligent threat detection
@@ -30,9 +33,9 @@ Mantis is designed to work on any Ubuntu-based system meeting the following requ
 - Memory: 8GB RAM minimum, 16GB or more for high-traffic environments
 
 ## How to install system
-- download: Download from release page in github then select conform to architecture with your computer
-- run script: Unpack your package by downloading then opration deploy.sh script
-- install: Look at the requiring with step by step from deploy.sh
+- Download: Download from release page in github then select conform to architecture with your computer
+- Run Script: Unpack your package by downloading then opration deploy.sh script
+- Install: Look at the requiring with step by step from deploy.sh
 
 ## Contribution 
 - **@DaLaw2**: Propose the ebpf technology in https://github.com/DaLaw2/NetGuardia
