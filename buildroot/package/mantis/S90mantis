@@ -48,8 +48,12 @@ supervise() {
 	ulimit -l unlimited
 	port=$(sed -n -E 's/^http_server_bind_port[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' config.toml)
 	port="${port:-8080}"
-	child=""
-	trap 'log "stopping mantis"; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null && wait "$child"
+	child="" napper=""
+	# sh runs a trap only once the foreground command is done: the backoff
+	# wait below is "sleep & wait", which a signal interrupts at once (a plain
+	# 5 min backoff sleep held "Stopping mantis" for its full 30 s).
+	trap 'log "stopping mantis"; [ -n "$napper" ] && kill "$napper" 2>/dev/null
+		[ -n "$child" ] && kill -TERM "$child" 2>/dev/null && wait "$child"
 		xdp_detach; exit 0' TERM INT
 	backoff=5
 	while :; do
@@ -106,7 +110,10 @@ supervise() {
 		else
 			log "mantis exited ($status) after ${ran} s, NO traffic (BYPASS=closed), restarting in ${backoff} s"
 		fi
-		sleep "$backoff"
+		sleep "$backoff" &
+		napper=$!
+		wait "$napper"
+		napper=""
 	done
 }
 
@@ -138,6 +145,7 @@ stop() {
 	if [ -f "$PIDFILE" ]; then
 		pid="$(cat "$PIDFILE")"
 		kill -TERM "$pid" 2>/dev/null
+		kill -0 "$pid" 2>/dev/null && printf "waiting for mantis to exit (up to 30 s)... "
 		# TimeoutStopSec=30
 		for _ in $(seq 30); do
 			kill -0 "$pid" 2>/dev/null || break
