@@ -10,7 +10,8 @@ BOARD_DIR="$(dirname "$0")"
 KCONFIG="$(ls -d "$BUILD_DIR"/linux-[0-9]*/.config | head -n 1)"
 missing=""
 for opt in BPF_SYSCALL BPF_JIT XDP_SOCKETS DEBUG_INFO_BTF HUGETLBFS BRIDGE NF_TABLES NF_TABLES_INET NFT_CT SOFT_WATCHDOG \
-	IGB IGBVF IGC E1000 E1000E IXGBE I40E R8169 8139TOO VIRTIO_NET VMXNET3; do
+	IGB IGBVF IGC E1000 E1000E IXGBE I40E R8169 8139TOO VIRTIO_NET VMXNET3 \
+	FB_EFI FRAMEBUFFER_CONSOLE; do
 	grep -qx "CONFIG_$opt=y" "$KCONFIG" || missing="$missing $opt"
 done
 # firmware-loading drivers (wired, and WiFi for the management NIC) are modules
