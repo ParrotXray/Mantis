@@ -15,9 +15,10 @@ CONF="$PREFIX/appliance.conf"
 PIDFILE="/var/run/mantis-supervisor.pid"
 LOG="$PREFIX/state/logs/console.log"
 . /usr/lib/mantis/bypass.sh
+. /usr/lib/mantis/xsk.sh
 
 load_conf() {
-	NIC_INGRESS="" NIC_EGRESS="" NIC_COMBINED_QUEUES="" NIC_ETHTOOL_FEATURES="" HUGEPAGES="" BYPASS="open"
+	NIC_INGRESS="" NIC_EGRESS="" NIC_COMBINED_QUEUES="" XSK_BIND_MODE="" NIC_ETHTOOL_FEATURES="" HUGEPAGES="" BYPASS="open"
 	. "$CONF"
 }
 
@@ -37,28 +38,16 @@ log() {
 	echo "=== $(date '+%F %T') $*" >> "$LOG"
 }
 
-# Drivers with AF_XDP zero-copy in this kernel (6.12). igb, e1000e, r8169
-# and most others only do copy mode: binding them with xsk_bind_mode =
-# "zero" fails ("non-zero error code returned when creating AF_XDP socket")
-# and Mantis exits. igb gains zero-copy in Linux 6.14.
-ZC_DRIVERS="i40e ice ixgbe igc mlx5_core"
-
-# config.toml from the example says "zero": switch it to "copy" when either
-# inspection NIC cannot do zero-copy (it would never start otherwise).
+# config.toml says "zero" but an inspection NIC cannot do zero-copy (e.g. a
+# config.toml from before mantis-setup asked, or a NIC swapped since): Mantis
+# would never start, so switch to "copy" (drivers: /usr/lib/mantis/xsk.sh).
+# Left alone when zero was chosen in mantis-setup despite the warning.
 fix_bind_mode() {
+	[ "$XSK_BIND_MODE" = zero ] && return 0
 	grep -qE '^xsk_bind_mode[[:space:]]*=[[:space:]]*"zero"' "$PREFIX/config.toml" || return 0
-	for nic in "$NIC_INGRESS" "$NIC_EGRESS"; do
-		[ -n "$nic" ] || continue
-		drv=$(ethtool -i "$nic" 2>/dev/null | sed -n 's/^driver: //p')
-		case " $ZC_DRIVERS " in
-			*" $drv "*) ;;
-			*)
-				sed -i -E 's|^(xsk_bind_mode[[:space:]]*=[[:space:]]*)"zero"|\1"copy"|' "$PREFIX/config.toml"
-				log "$nic ($drv) has no AF_XDP zero-copy: xsk_bind_mode set to \"copy\" in config.toml"
-				return 0
-				;;
-		esac
-	done
+	xsk_zc_capable $NIC_INGRESS $NIC_EGRESS && return 0
+	sed -i -E 's|^(xsk_bind_mode[[:space:]]*=[[:space:]]*)"zero"|\1"copy"|' "$PREFIX/config.toml"
+	log "$NIC_INGRESS ($(xsk_driver "$NIC_INGRESS")) / $NIC_EGRESS ($(xsk_driver "$NIC_EGRESS")): no AF_XDP zero-copy, xsk_bind_mode set to \"copy\" in config.toml"
 }
 
 # Is the web UI answering? Any HTTP status counts: the process is serving.
