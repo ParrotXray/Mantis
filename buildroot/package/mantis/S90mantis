@@ -15,9 +15,10 @@ CONF="$PREFIX/appliance.conf"
 PIDFILE="/var/run/mantis-supervisor.pid"
 LOG="$PREFIX/state/logs/console.log"
 . /usr/lib/mantis/bypass.sh
+. /usr/lib/mantis/xsk.sh
 
 load_conf() {
-	NIC_INGRESS="" NIC_EGRESS="" NIC_COMBINED_QUEUES="" NIC_ETHTOOL_FEATURES="" HUGEPAGES="" BYPASS="open"
+	NIC_INGRESS="" NIC_EGRESS="" NIC_COMBINED_QUEUES="" XSK_BIND_MODE="" NIC_ETHTOOL_FEATURES="" HUGEPAGES="" BYPASS="open"
 	. "$CONF"
 }
 
@@ -37,6 +38,18 @@ log() {
 	echo "=== $(date '+%F %T') $*" >> "$LOG"
 }
 
+# config.toml says "zero" but an inspection NIC cannot do zero-copy (e.g. a
+# config.toml from before mantis-setup asked, or a NIC swapped since): Mantis
+# would never start, so switch to "copy" (drivers: /usr/lib/mantis/xsk.sh).
+# Left alone when zero was chosen in mantis-setup despite the warning.
+fix_bind_mode() {
+	[ "$XSK_BIND_MODE" = zero ] && return 0
+	grep -qE '^xsk_bind_mode[[:space:]]*=[[:space:]]*"zero"' "$PREFIX/config.toml" || return 0
+	xsk_zc_capable $NIC_INGRESS $NIC_EGRESS && return 0
+	sed -i -E 's|^(xsk_bind_mode[[:space:]]*=[[:space:]]*)"zero"|\1"copy"|' "$PREFIX/config.toml"
+	log "$NIC_INGRESS ($(xsk_driver "$NIC_INGRESS")) / $NIC_EGRESS ($(xsk_driver "$NIC_EGRESS")): no AF_XDP zero-copy, xsk_bind_mode set to \"copy\" in config.toml"
+}
+
 # Is the web UI answering? Any HTTP status counts: the process is serving.
 http_alive() {
 	wget -q -S -T 5 -O /dev/null "http://127.0.0.1:$1/" 2>&1 | grep -q 'HTTP/'
@@ -48,8 +61,12 @@ supervise() {
 	ulimit -l unlimited
 	port=$(sed -n -E 's/^http_server_bind_port[[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' config.toml)
 	port="${port:-8080}"
-	child=""
-	trap 'log "stopping mantis"; [ -n "$child" ] && kill -TERM "$child" 2>/dev/null && wait "$child"
+	child="" napper=""
+	# sh runs a trap only once the foreground command is done: the backoff
+	# wait below is "sleep & wait", which a signal interrupts at once (a plain
+	# 5 min backoff sleep held "Stopping mantis" for its full 30 s).
+	trap 'log "stopping mantis"; [ -n "$napper" ] && kill "$napper" 2>/dev/null
+		[ -n "$child" ] && kill -TERM "$child" 2>/dev/null && wait "$child"
 		xdp_detach; exit 0' TERM INT
 	backoff=5
 	while :; do
@@ -106,7 +123,10 @@ supervise() {
 		else
 			log "mantis exited ($status) after ${ran} s, NO traffic (BYPASS=closed), restarting in ${backoff} s"
 		fi
-		sleep "$backoff"
+		sleep "$backoff" &
+		napper=$!
+		wait "$napper"
+		napper=""
 	done
 }
 
@@ -125,6 +145,7 @@ start() {
 	fi
 	load_conf
 	apply_nic
+	fix_bind_mode
 	bridge_apply
 	# -b detaches and closes every inherited fd, so callers piping our
 	# output (mantis-setup | tail) are not held open by the supervisor.
@@ -138,6 +159,7 @@ stop() {
 	if [ -f "$PIDFILE" ]; then
 		pid="$(cat "$PIDFILE")"
 		kill -TERM "$pid" 2>/dev/null
+		kill -0 "$pid" 2>/dev/null && printf "waiting for mantis to exit (up to 30 s)... "
 		# TimeoutStopSec=30
 		for _ in $(seq 30); do
 			kill -0 "$pid" 2>/dev/null || break

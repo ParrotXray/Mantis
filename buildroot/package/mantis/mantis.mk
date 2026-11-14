@@ -43,6 +43,8 @@ define MANTIS_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/lib/mantis/bypass.sh
 	$(INSTALL) -D -m 0644 $(MANTIS_PKGDIR)/slots.sh \
 		$(TARGET_DIR)/usr/lib/mantis/slots.sh
+	$(INSTALL) -D -m 0644 $(MANTIS_PKGDIR)/xsk.sh \
+		$(TARGET_DIR)/usr/lib/mantis/xsk.sh
 	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/mantis-upgrade \
 		$(TARGET_DIR)/usr/sbin/mantis-upgrade
 	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/mantis-logrotate \

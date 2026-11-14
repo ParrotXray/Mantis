@@ -13,6 +13,7 @@ set -euo pipefail
 
 PREFIX="/opt/mantis"
 CONF="$PREFIX/appliance.conf"
+. /usr/lib/mantis/xsk.sh
 
 RED='\033[0;31m' GREEN='\033[0;32m' YELLOW='\033[1;33m' BLUE='\033[0;34m' NC='\033[0m'
 log_info() { echo -e "${BLUE}[INFO]${NC} $*"; }
@@ -168,6 +169,31 @@ while true; do
 	[[ "$XDP_MODE" =~ ^(auto|native|generic)$ ]] && break
 	log_err "xdp_mode must be auto, native or generic"
 done
+
+# AF_XDP bind mode: generic XDP only works with copy; zero-copy needs driver
+# support (/usr/lib/mantis/xsk.sh), otherwise Mantis cannot create its socket.
+if [[ "$XDP_MODE" == "generic" ]]; then
+	XSK_BIND_MODE="copy"
+	log_info "xsk_bind_mode: copy (required by generic XDP)"
+else
+	if xsk_zc_capable "$NIC_INGRESS" "$NIC_EGRESS"; then
+		bind_default="zero"
+		log_info "$NIC_INGRESS / $NIC_EGRESS support AF_XDP zero-copy (fastest)"
+	else
+		bind_default="copy"
+		log_info "$(xsk_driver "$NIC_INGRESS") / $(xsk_driver "$NIC_EGRESS") have no AF_XDP zero-copy in this kernel: use copy"
+	fi
+	while true; do
+		XSK_BIND_MODE=$(ask "xsk_bind_mode (zero: zero-copy | copy)" "$bind_default")
+		[[ "$XSK_BIND_MODE" =~ ^(zero|copy)$ ]] || { log_err "xsk_bind_mode must be zero or copy"; continue; }
+		if [[ "$XSK_BIND_MODE" == "zero" && "$bind_default" == "copy" ]]; then
+			log_warn "these drivers are not on the zero-copy list (/usr/lib/mantis/xsk.sh): if they"
+			log_warn "really lack it, Mantis fails to create its AF_XDP socket and keeps restarting"
+			confirm "Use zero anyway" "n" || continue
+		fi
+		break
+	done
+fi
 features=()
 gro_default="y"
 [[ "$XDP_MODE" == "native" ]] && gro_default="n"
@@ -202,6 +228,9 @@ write_config=1
 if [[ -f "$PREFIX/config.toml" ]] && ! confirm "$PREFIX/config.toml already exists, overwrite it" "n"; then
 	write_config=0
 	log_info "Keeping existing $PREFIX/config.toml"
+	# asked above; a kept config.toml with the wrong bind mode never starts
+	set_toml_value "xsk_bind_mode" "\"$XSK_BIND_MODE\"" "$PREFIX/config.toml"
+	log_info "xsk_bind_mode set to $XSK_BIND_MODE in $PREFIX/config.toml"
 fi
 if [[ $write_config -eq 1 ]]; then
 	tmp=$(mktemp)
@@ -210,7 +239,7 @@ if [[ $write_config -eq 1 ]]; then
 	set_toml_value "egress_ifname" "\"$NIC_EGRESS\"" "$tmp"
 	set_toml_value "combined_queue_count" "$NIC_COMBINED_QUEUES" "$tmp"
 	set_toml_value "xdp_mode" "\"$XDP_MODE\"" "$tmp"
-	[[ "$XDP_MODE" == "generic" ]] && set_toml_value "xsk_bind_mode" "\"copy\"" "$tmp"
+	set_toml_value "xsk_bind_mode" "\"$XSK_BIND_MODE\"" "$tmp"
 	set_toml_value "frame_size" "$FRAME_SIZE" "$tmp"
 	set_toml_value "frame_count" "$FRAME_COUNT" "$tmp"
 	# Mantis refuses fill_queue_size > frame_count (the example has 8192)
@@ -295,6 +324,7 @@ MGMT_WIFI_COUNTRY="$MGMT_WIFI_COUNTRY"
 NIC_INGRESS="$NIC_INGRESS"
 NIC_EGRESS="$NIC_EGRESS"
 NIC_COMBINED_QUEUES="$NIC_COMBINED_QUEUES"
+XSK_BIND_MODE="$XSK_BIND_MODE"
 NIC_ETHTOOL_FEATURES="$NIC_ETHTOOL_FEATURES"
 HUGEPAGES="$HUGEPAGES"
 BYPASS="$BYPASS"
