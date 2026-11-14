@@ -1,0 +1,5 @@
+#!/bin/sh
+# /etc/acpi/PWRF/00000080: run by acpid when the power button is pressed
+echo "Power button pressed: shutting down" > /dev/console
+logger -t acpid "power button pressed, shutting down"
+poweroff
