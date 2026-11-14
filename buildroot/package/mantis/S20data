@@ -16,6 +16,13 @@ grow_data() {
 	disk="/dev/$(lsblk -no PKNAME "$dev")"
 	part="$(cat "/sys/class/block/$(basename "$dev")/partition")"
 	[ -b "$disk" ] && [ -n "$part" ] || return 1
+	size="$(lsblk -dno SIZE "$disk" | tr -d ' ')"
+	# Not a prompt: resize2fs writes metadata for the whole disk and prints
+	# nothing meanwhile, which looks like a hang on a large or slow disk.
+	echo
+	echo "  first boot: growing the data partition to fill $disk ($size)."
+	echo "  This takes a few minutes on a large or slow disk; nothing to type, please wait."
+	printf "Mounting Mantis data partition: "
 	# The image was written to a larger disk: move the GPT backup header
 	# to the real end, then let the last partition take the free space.
 	sfdisk --relocate gpt-bak-std "$disk" >/dev/null 2>&1
