@@ -186,6 +186,19 @@ CONFIG_RT2800USB=m
 # Simulated radios: only used by test/qemu-boot-test.py
 CONFIG_MAC80211_HWSIM=m
 
+# --- Local console on a physical screen ---
+# A UEFI machine has no VGA text mode: without a framebuffer the screen
+# stays blank once GRUB hands over to the kernel (QEMU tests use -nographic,
+# serial only, so they never notice). efifb draws on the framebuffer the
+# firmware (GOP) set up: works on any GPU, no GPU driver or firmware needed.
+CONFIG_FB=y
+CONFIG_FB_EFI=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y
+# Machines booted through CSM / legacy BIOS still get the VGA text console
+CONFIG_VGA_CONSOLE=y
+# No GPU drivers: they would take the screen over from efifb and need firmware
+# CONFIG_DRM is not set
+
 # --- Not needed on an appliance ---
 # CONFIG_SOUND is not set
-# CONFIG_DRM is not set
