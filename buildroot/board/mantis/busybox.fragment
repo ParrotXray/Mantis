@@ -9,3 +9,5 @@ CONFIG_STAT=y
 CONFIG_FEATURE_STAT_FORMAT=y
 # ntpd: clock sync (S42ntp)
 CONFIG_NTPD=y
+# acpid: the case power button shuts down cleanly (S10acpid, /etc/acpi/PWRF)
+CONFIG_ACPID=y

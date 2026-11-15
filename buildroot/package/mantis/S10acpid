@@ -1,0 +1,21 @@
+#!/bin/sh
+#
+# BusyBox acpid: a short press on the case power button shuts the appliance
+# down cleanly (/etc/acpi/PWRF/00000080 -> poweroff, which runs the init.d
+# stop scripts: Mantis stops, the data partition is synced and unmounted).
+# Without it the button does nothing and only a forced power-off works.
+
+case "$1" in
+	start)
+		printf "Starting acpid (power button): "
+		# no -p: it only exists with BusyBox FEATURE_PIDFILE
+		acpid -l /var/log/acpid.log && echo "OK" || echo "FAIL"
+		;;
+	stop)
+		printf "Stopping acpid: "
+		killall acpid 2>/dev/null
+		echo "OK"
+		;;
+	restart|reload) "$0" stop; "$0" start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

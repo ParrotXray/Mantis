@@ -53,11 +53,17 @@ define MANTIS_INSTALL_TARGET_CMDS
 		$(TARGET_DIR)/usr/sbin/mantis-ntp-event
 	$(INSTALL) -D -m 0644 $(MANTIS_PKGDIR)/mantis-firstlogin.sh \
 		$(TARGET_DIR)/etc/profile.d/mantis-firstlogin.sh
+	$(INSTALL) -D -m 0644 $(MANTIS_PKGDIR)/acpid.conf \
+		$(TARGET_DIR)/etc/acpid.conf
+	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/acpi-power-button \
+		$(TARGET_DIR)/etc/acpi/PWRF/00000080
 endef
 
 define MANTIS_INSTALL_INIT_SYSV
 	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/S05trialdog \
 		$(TARGET_DIR)/etc/init.d/S05trialdog
+	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/S10acpid \
+		$(TARGET_DIR)/etc/init.d/S10acpid
 	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/S20data \
 		$(TARGET_DIR)/etc/init.d/S20data
 	$(INSTALL) -D -m 0755 $(MANTIS_PKGDIR)/S21bypass \

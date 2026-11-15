@@ -33,7 +33,7 @@ add_fstab cgroup2 "cgroup2		/sys/fs/cgroup	cgroup2	nsdelegate	0	0"
 missing=""
 for f in usr/sbin/nft usr/bin/stunnel usr/bin/openssl usr/sbin/ntpd usr/bin/flock \
 	usr/sbin/wpa_supplicant usr/sbin/ethtool usr/share/zoneinfo/Etc/UTC usr/share/zoneinfo/Asia/Taipei \
-	usr/bin/curl sbin/blockdev bin/lsblk boot/bzImage usr/sbin/mantis-upgrade; do
+	usr/bin/curl sbin/acpid etc/acpi/PWRF/00000080 sbin/blockdev bin/lsblk boot/bzImage usr/sbin/mantis-upgrade; do
 	[ -e "$TARGET_DIR/$f" ] || missing="$missing /$f"
 done
 if [ -n "$missing" ]; then
