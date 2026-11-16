@@ -4,7 +4,7 @@
 **Mantis** is a high-performance network security solution that combines eBPF XDP technology with deep learning models to provide advanced network protection. The system operates as a standalone network appliance that can run on any Ubuntu-based system with compatible network hardware.
 
 ## System Traffic Overview
-<img width="2890" height="1162" alt="image" src="https://github.com/user-attachments/assets/a67e39ff-63ab-434f-879c-b031acbea9ae" />
+<img width="2890" height="1160" alt="image" src="https://github.com/user-attachments/assets/cf9d72c0-95a0-49d4-bea1-e3f969a2f8d1" />
 
 ## Core Technologies
 - **eBPF XDP Technology** - Provides high-performance packet processing directly at the data link layer
@@ -39,5 +39,8 @@ Mantis is designed to work on any Ubuntu-based system meeting the following requ
 
 ## Contribution 
 - **@DaLaw2**: Propose the ebpf technology in https://github.com/DaLaw2/NetGuardia
+- **@OISF**: Great signature rule IDS/IPS in https://github.com/oisf/suricata
+- **Proofpoint Emerging Threats Rules**: Propose the very full rule set
+- **PT Rules**: Propose the Attack Detection that expansion my rule set
 
 The system is not limited to embedded platforms and can be deployed on standard server hardware, virtual machines, or dedicated appliances running Ubuntu.
