@@ -4,7 +4,7 @@
 **Mantis** is a high-performance network security solution that combines eBPF XDP technology with deep learning models to provide advanced network protection. The system operates as a standalone network appliance that can run on any Ubuntu-based system with compatible network hardware.
 
 ## System Traffic Overview
-<img width="2890" height="1160" alt="image" src="https://github.com/user-attachments/assets/cf9d72c0-95a0-49d4-bea1-e3f969a2f8d1" />
+<img width="2890" height="1160" alt="image" src="https://github.com/user-attachments/assets/b651615a-e194-4501-a8ea-d4520da0eb29" />
 
 ## Core Technologies
 - **eBPF XDP Technology** - Provides high-performance packet processing directly at the data link layer
